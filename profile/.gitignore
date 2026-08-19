@@ -1,0 +1,3 @@
+# Keep this directory available for #HPC --output without committing job data.
+*
+!.gitignore
