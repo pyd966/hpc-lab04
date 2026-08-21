@@ -5,6 +5,8 @@ project(amss_ncku_lab LANGUAGES CXX Fortran)
 option(AMSS_ENABLE_GPU "Enable CUDA GPU build (ABEGPU target)" OFF)
 set(AMSS_OPT "-O3" CACHE STRING "C/C++/Fortran optimization level")
 set(AMSS_ARCH_FLAGS "" CACHE STRING "Architecture-specific compiler flags")
+set(AMSS_TWOPUNCTURE_OPT "-Ofast" CACHE STRING "TwoPuncture-only optimization level")
+set(AMSS_TWOPUNCTURE_ARCH_FLAGS "-march=native" CACHE STRING "TwoPuncture-only architecture flags")
 option(AMSS_ENABLE_OPENMP "Link OpenMP to all executables" OFF)
 set(AMSS_MPI_CUDA_AWARE 0 CACHE STRING "Set MPI_CUDA_AWARE macro for ABEGPU (0/1)")
 set_property(CACHE AMSS_MPI_CUDA_AWARE PROPERTY STRINGS 0 1)
@@ -17,6 +19,8 @@ set_property(CACHE AMSS_MPI_CUDA_AWARE PROPERTY STRINGS 0 1)
 # Fortran side skips the f90 modules). Apply to every supported compiler.
 separate_arguments(AMSS_OPT_LIST UNIX_COMMAND "${AMSS_OPT}")
 separate_arguments(AMSS_ARCH_FLAGS_LIST UNIX_COMMAND "${AMSS_ARCH_FLAGS}")
+separate_arguments(AMSS_TWOPUNCTURE_OPT_LIST UNIX_COMMAND "${AMSS_TWOPUNCTURE_OPT}")
+separate_arguments(AMSS_TWOPUNCTURE_ARCH_FLAGS_LIST UNIX_COMMAND "${AMSS_TWOPUNCTURE_ARCH_FLAGS}")
 
 # Clang/IntelLLVM/ARMClang all accept the GCC-style flags used here.
 # COMPILE_LANG_AND_ID takes comma-separated compiler IDs (not CMake list).
@@ -55,6 +59,9 @@ target_link_libraries(ABE PRIVATE MPI::MPI_CXX)
 
 # --- TwoPunctureABE: initial-data solver -----------------------------------
 add_executable(TwoPunctureABE src/TwoPunctureABE.C src/TwoPunctures.C)
+target_compile_options(TwoPunctureABE PRIVATE
+  "$<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang,IntelLLVM,Intel,ARMClang>:${AMSS_TWOPUNCTURE_OPT_LIST};${AMSS_TWOPUNCTURE_ARCH_FLAGS_LIST}>"
+)
 target_link_libraries(TwoPunctureABE PRIVATE MPI::MPI_CXX)
 
 # --- Optional OpenMP --------------------------------------------------------
@@ -114,4 +121,5 @@ else()
   message(STATUS "GPU      : OFF")
 endif()
 message(STATUS "AMSS_OPT=${AMSS_OPT} ARCH_FLAGS=${AMSS_ARCH_FLAGS} OPENMP=${AMSS_ENABLE_OPENMP} MPI_CUDA_AWARE=${AMSS_MPI_CUDA_AWARE}")
+message(STATUS "TWOP_OPT=${AMSS_TWOPUNCTURE_OPT} TWOP_ARCH=${AMSS_TWOPUNCTURE_ARCH_FLAGS}")
 message(STATUS "==========================================================")
