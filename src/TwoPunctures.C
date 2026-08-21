@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstdio>
 #include <complex>
+#include <vector>
 using namespace std;
 #else
 #include <assert.h>
@@ -27,6 +28,98 @@ using namespace std;
 #endif
 
 #include "TwoPunctures.h"
+
+namespace
+{
+struct TransformWorkspace
+{
+  vector<double> p, dp, d2p, q, dq, r, dr, result, four_a, four_b;
+  vector<int> indx;
+
+  void ensure(int n)
+  {
+    size_t const size = static_cast<size_t>(n + 1);
+    if (p.size() >= size)
+      return;
+    p.resize(size);
+    dp.resize(size);
+    d2p.resize(size);
+    q.resize(size);
+    dq.resize(size);
+    r.resize(size);
+    dr.resize(size);
+    result.resize(size);
+    four_a.resize(size);
+    four_b.resize(size);
+    indx.resize(size);
+  }
+};
+
+struct LineWorkspace
+{
+  vector<double> diag, e, f, b, x, l, u, d, y;
+
+  void ensure(int n)
+  {
+    size_t const size = static_cast<size_t>(n);
+    if (diag.size() >= size)
+      return;
+    diag.resize(size);
+    e.resize(size);
+    f.resize(size);
+    b.resize(size);
+    x.resize(size);
+    l.resize(size);
+    u.resize(size);
+    d.resize(size);
+    y.resize(size);
+  }
+};
+
+struct PointWorkspace
+{
+  vector<double> values, storage;
+  TwoPunctures::derivs dU, U;
+
+  void ensure(int nvar)
+  {
+    size_t const variables = static_cast<size_t>(nvar);
+    if (values.size() < variables)
+    {
+      values.resize(variables);
+      storage.resize(20 * variables);
+    }
+
+    double *d = storage.data();
+    dU.d0 = d;
+    dU.d1 = d + variables;
+    dU.d2 = d + 2 * variables;
+    dU.d3 = d + 3 * variables;
+    dU.d11 = d + 4 * variables;
+    dU.d12 = d + 5 * variables;
+    dU.d13 = d + 6 * variables;
+    dU.d22 = d + 7 * variables;
+    dU.d23 = d + 8 * variables;
+    dU.d33 = d + 9 * variables;
+
+    double *u = d + 10 * variables;
+    U.d0 = u;
+    U.d1 = u + variables;
+    U.d2 = u + 2 * variables;
+    U.d3 = u + 3 * variables;
+    U.d11 = u + 4 * variables;
+    U.d12 = u + 5 * variables;
+    U.d13 = u + 6 * variables;
+    U.d22 = u + 7 * variables;
+    U.d23 = u + 8 * variables;
+    U.d33 = u + 9 * variables;
+  }
+};
+
+thread_local TransformWorkspace transform_workspace;
+thread_local LineWorkspace line_workspace;
+thread_local PointWorkspace point_workspace;
+}
 
 TwoPunctures::TwoPunctures(double mp, double mm, double b,
                            double P_plusx, double P_plusy, double P_plusz,
@@ -654,7 +747,8 @@ void TwoPunctures::chebft_Zeros(double u[], int n, int inv)
   int k, j, isignum;
   double fac, sum, Pion, *c;
 
-  c = dvector(0, n);
+  transform_workspace.ensure(n);
+  c = transform_workspace.result.data();
   Pion = Pi / n;
   if (inv == 0)
   {
@@ -685,7 +779,6 @@ void TwoPunctures::chebft_Zeros(double u[], int n, int inv)
   }
   for (j = 0; j < n; j++)
     u[j] = c[j];
-  free_dvector(c, 0, n);
 }
 
 /* --------------------------------------------------------------------------*/
@@ -695,7 +788,8 @@ void TwoPunctures::chebft_Extremes(double u[], int n, int inv)
   int k, j, isignum, N = n - 1;
   double fac, sum, PioN, *c;
 
-  c = dvector(0, N);
+  transform_workspace.ensure(N);
+  c = transform_workspace.result.data();
   PioN = Pi / N;
   if (inv == 0)
   {
@@ -727,7 +821,6 @@ void TwoPunctures::chebft_Extremes(double u[], int n, int inv)
   }
   for (j = 0; j < n; j++)
     u[j] = c[j];
-  free_dvector(c, 0, N);
 }
 
 /* --------------------------------------------------------------------------*/
@@ -773,8 +866,9 @@ void TwoPunctures::fourft(double *u, int N, int inv)
   double x, x1, fac, Pi_fac, *a, *b;
 
   M = N / 2;
-  a = dvector(0, M);
-  b = dvector(1, M); /* Actually: b=vector(1,M-1) but this is problematic if M=1*/
+  transform_workspace.ensure(M);
+  a = transform_workspace.four_a.data();
+  b = transform_workspace.four_b.data();
   fac = 1. / M;
   Pi_fac = Pi * fac;
   if (inv == 0)
@@ -823,8 +917,6 @@ void TwoPunctures::fourft(double *u, int N, int inv)
       iy = -iy;
     }
   }
-  free_dvector(a, 0, M);
-  free_dvector(b, 1, M);
 }
 
 /* -----------------------------------------*/
@@ -1125,14 +1217,15 @@ void TwoPunctures::Derivatives_AB3(int nvar, int n1, int n2, int n3, derivs v)
   double *p, *dp, *d2p, *q, *dq, *r, *dr;
 
   N = maximum3(n1, n2, n3);
-  p = dvector(0, N);
-  dp = dvector(0, N);
-  d2p = dvector(0, N);
-  q = dvector(0, N);
-  dq = dvector(0, N);
-  r = dvector(0, N);
-  dr = dvector(0, N);
-  indx = ivector(0, N);
+  transform_workspace.ensure(N);
+  p = transform_workspace.p.data();
+  dp = transform_workspace.dp.data();
+  d2p = transform_workspace.d2p.data();
+  q = transform_workspace.q.data();
+  dq = transform_workspace.dq.data();
+  r = transform_workspace.r.data();
+  dr = transform_workspace.dr.data();
+  indx = transform_workspace.indx.data();
 
   for (ivar = 0; ivar < nvar; ivar++)
   {
@@ -1215,14 +1308,6 @@ void TwoPunctures::Derivatives_AB3(int nvar, int n1, int n2, int n3, derivs v)
       }
     }
   }
-  free_dvector(p, 0, N);
-  free_dvector(dp, 0, N);
-  free_dvector(d2p, 0, N);
-  free_dvector(q, 0, N);
-  free_dvector(dq, 0, N);
-  free_dvector(r, 0, N);
-  free_dvector(dr, 0, N);
-  free_ivector(indx, 0, N);
 }
 /* --------------------------------------------------------------------------*/
 void TwoPunctures::Newton(int const nvar, int const n1, int const n2, int const n3,
@@ -1291,8 +1376,9 @@ void TwoPunctures::F_of_v(int nvar, int n1, int n2, int n3, derivs v, double *F,
   derivs U;
   double *sources;
 
-  values = dvector(0, nvar - 1);
-  allocate_derivs(&U, nvar);
+  point_workspace.ensure(nvar);
+  values = point_workspace.values.data();
+  U = point_workspace.U;
 
   sources = (double *)calloc(n1 * n2 * n3, sizeof(double));
   if (0)
@@ -1449,8 +1535,6 @@ void TwoPunctures::F_of_v(int nvar, int n1, int n2, int n3, derivs v, double *F,
     fclose(debugfile);
   }
   free(sources);
-  free_dvector(values, 0, nvar - 1);
-  free_derivs(&U, nvar);
 }
 /* --------------------------------------------------------------------------*/
 double TwoPunctures::norm_inf(double const *F, int const ntotal)
@@ -1855,12 +1939,13 @@ void TwoPunctures::J_times_dv(int nvar, int n1, int n2, int n3, derivs dv, doubl
   derivs dU, U;
 
   Derivatives_AB3(nvar, n1, n2, n3, dv);
+  point_workspace.ensure(nvar);
+  values = point_workspace.values.data();
+  dU = point_workspace.dU;
+  U = point_workspace.U;
 
   for (i = 0; i < n1; i++)
   {
-    values = dvector(0, nvar - 1);
-    allocate_derivs(&dU, nvar);
-    allocate_derivs(&U, nvar);
     for (j = 0; j < n2; j++)
     {
       for (k = 0; k < n3; k++)
@@ -1914,9 +1999,6 @@ void TwoPunctures::J_times_dv(int nvar, int n1, int n2, int n3, derivs dv, doubl
         }
       }
     }
-    free_dvector(values, 0, nvar - 1);
-    free_derivs(&dU, nvar);
-    free_derivs(&U, nvar);
   }
 }
 /* --------------------------------------------------------------------------*/
@@ -1963,11 +2045,12 @@ void TwoPunctures::LineRelax_be(double *dv,
 {
   int j, m, Ic, Ip, Im, col, ivar;
 
-  double *diag = new double[n2];
-  double *e = new double[n2 - 1]; /* above diagonal */
-  double *f = new double[n2 - 1]; /* below diagonal */
-  double *b = new double[n2];     /* rhs */
-  double *x = new double[n2];     /* solution vector */
+  line_workspace.ensure(n2);
+  double *__restrict diag = line_workspace.diag.data();
+  double *__restrict e = line_workspace.e.data(); /* above diagonal */
+  double *__restrict f = line_workspace.f.data(); /* below diagonal */
+  double *__restrict b = line_workspace.b.data(); /* rhs */
+  double *__restrict x = line_workspace.x.data(); /* solution vector */
 
   //  gsl_vector *diag = gsl_vector_alloc(n2);
   //  gsl_vector *e = gsl_vector_alloc(n2-1); /* above diagonal */
@@ -2019,7 +2102,7 @@ void TwoPunctures::LineRelax_be(double *dv,
     //              (  0  f_1 d_2 e_2 )
     //              (  0   0  f_2 d_3 )
     //
-    ThomasAlgorithm(n2, f, diag, e, x, b);
+    ThomasAlgorithm(n2, f, diag, e, x, b, line_workspace.l.data(), line_workspace.u.data(), line_workspace.d.data(), line_workspace.y.data());
     //    gsl_linalg_solve_tridiag(diag, e, f, b, x);
     for (j = 0; j < n2; j++)
     {
@@ -2029,11 +2112,6 @@ void TwoPunctures::LineRelax_be(double *dv,
     }
   }
 
-  delete[] diag;
-  delete[] e;
-  delete[] f;
-  delete[] b;
-  delete[] x;
   //  gsl_vector_free(diag);
   //  gsl_vector_free(e);
   //  gsl_vector_free(f);
@@ -2055,8 +2133,9 @@ void TwoPunctures::JFD_times_dv(int i, int j, int k, int nvar, int n1, int n2,
       ha, ga, ga2, hb, gb, gb2, hp, gp, gp2, gagb, gagp, gbgp;
   derivs dU, U;
 
-  allocate_derivs(&dU, nvar);
-  allocate_derivs(&U, nvar);
+  point_workspace.ensure(nvar);
+  dU = point_workspace.dU;
+  U = point_workspace.U;
 
   if (k < 0)
     k = k + n3;
@@ -2175,8 +2254,6 @@ void TwoPunctures::JFD_times_dv(int i, int j, int k, int nvar, int n1, int n2,
   for (ivar = 0; ivar < nvar; ivar++)
     values[ivar] *= FAC;
 
-  free_derivs(&dU, nvar);
-  free_derivs(&U, nvar);
 }
 #undef FAC
 /*-----------------------------------------------------------*/
@@ -2208,11 +2285,12 @@ void TwoPunctures::LineRelax_al(double *dv,
 {
   int i, m, Ic, Ip, Im, col, ivar;
 
-  double *diag = new double[n1];
-  double *e = new double[n1 - 1]; /* above diagonal */
-  double *f = new double[n1 - 1]; /* below diagonal */
-  double *b = new double[n1];     /* rhs */
-  double *x = new double[n1];     /* solution vector */
+  line_workspace.ensure(n1);
+  double *__restrict diag = line_workspace.diag.data();
+  double *__restrict e = line_workspace.e.data(); /* above diagonal */
+  double *__restrict f = line_workspace.f.data(); /* below diagonal */
+  double *__restrict b = line_workspace.b.data(); /* rhs */
+  double *__restrict x = line_workspace.x.data(); /* solution vector */
 
   //  gsl_vector *diag = gsl_vector_alloc(n1);
   //  gsl_vector *e = gsl_vector_alloc(n1-1); /* above diagonal */
@@ -2258,7 +2336,7 @@ void TwoPunctures::LineRelax_al(double *dv,
         }
       }
     }
-    ThomasAlgorithm(n1, f, diag, e, x, b);
+    ThomasAlgorithm(n1, f, diag, e, x, b, line_workspace.l.data(), line_workspace.u.data(), line_workspace.d.data(), line_workspace.y.data());
     //    gsl_linalg_solve_tridiag(diag, e, f, b, x);
     for (i = 0; i < n1; i++)
     {
@@ -2267,12 +2345,6 @@ void TwoPunctures::LineRelax_al(double *dv,
       //      dv[Ic] = gsl_vector_get(x, i);
     }
   }
-
-  delete[] diag;
-  delete[] e;
-  delete[] f;
-  delete[] b;
-  delete[] x;
 
   //  gsl_vector_free(diag);
   //  gsl_vector_free(e);
@@ -2288,14 +2360,9 @@ void TwoPunctures::LineRelax_al(double *dv,
 //              (  0  b_1 a_2 c_2 )
 //              (  0   0  b_2 a_3 )
 //"Parallel Scientific Computing in C++ and MPI" P361
-void TwoPunctures::ThomasAlgorithm(int N, double *b, double *a, double *c, double *x, double *q)
+void TwoPunctures::ThomasAlgorithm(int N, double *__restrict b, double *__restrict a, double *__restrict c, double *__restrict x, double *__restrict q, double *__restrict l, double *__restrict u, double *__restrict d, double *__restrict y)
 {
   int i;
-  double *l, *u, *d, *y;
-  l = new double[N - 1];
-  u = new double[N - 1];
-  d = new double[N];
-  y = new double[N];
 
   /* LU Decomposition */
   d[0] = a[0];
@@ -2321,11 +2388,6 @@ void TwoPunctures::ThomasAlgorithm(int N, double *b, double *a, double *c, doubl
 
   for (i = N - 2; i >= 0; i--)
     x[i] = (y[i] - u[i] * x[i + 1]) / d[i];
-
-  delete[] l;
-  delete[] u;
-  delete[] d;
-  delete[] y;
 
   return;
 }

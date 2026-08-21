@@ -133,7 +133,7 @@ public:
                          int const n1, int const n2, int const n3,
                          double const *rhs, int const *ncols,
                          int **cols, double **JFD);
-       void ThomasAlgorithm(int N, double *b, double *a, double *c, double *x, double *q);
+       void ThomasAlgorithm(int N, double *b, double *a, double *c, double *x, double *q, double *l, double *u, double *d, double *y);
        void Save(char *fname);
        // provided by Vasileios Paschalidis (vpaschal@illinois.edu)
        double Spec_IntPolABphiFast(parameters par, double *v, int ivar, double A, double B, double phi);
