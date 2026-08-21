@@ -14,6 +14,30 @@ using namespace std;
 #include "Parallel.h"
 #include "fmisc.h"
 
+// Shell values are doubles while the interpolation ownership weights are
+// integer counts.  A double can represent these small counts exactly, so the
+// two reductions can share one collective without changing the result.
+static void reduce_interp_values(double *local_shellf, int *local_weight,
+                                 double *shellf_out, int *weight_out,
+                                 int shell_count, int point_count,
+                                 MPI_Comm comm)
+{
+    const int total_count = shell_count + point_count;
+    double *combined = new double[total_count];
+    for (int i = 0; i < shell_count; ++i)
+        combined[i] = local_shellf[i];
+    for (int i = 0; i < point_count; ++i)
+        combined[shell_count + i] = static_cast<double>(local_weight[i]);
+
+    MPI_Allreduce(MPI_IN_PLACE, combined, total_count, MPI_DOUBLE, MPI_SUM, comm);
+
+    for (int i = 0; i < shell_count; ++i)
+        shellf_out[i] = combined[i];
+    for (int i = 0; i < point_count; ++i)
+        weight_out[i] = static_cast<int>(combined[shell_count + i]);
+    delete[] combined;
+}
+
 Patch::Patch(int DIM, int *shapei, double *bboxi, int levi, bool buflog, int Symmetry) : lev(levi)
 {
 
@@ -465,11 +489,10 @@ void Patch::Interp_Points(MyList<var> *VarList,
     MPI_Allreduce(weight, Weight, NN, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
     // (shellf was already reduced into Shellf inside the GPU block.)
 #else
-    // CPU path: Allreduce the local shellf/weight into Shellf/Weight.
-    MPI_Allreduce(shellf, Shellf, NN * num_var, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+    // CPU path: batch shell values and ownership weights in one collective.
     int *Weight;
     Weight = new int[NN];
-    MPI_Allreduce(weight, Weight, NN, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+    reduce_interp_values(shellf, weight, Shellf, Weight, NN * num_var, NN, MPI_COMM_WORLD);
 #endif
 
     for (int i = 0; i < NN; i++)
@@ -658,10 +681,9 @@ void Patch::Interp_Points(MyList<var> *VarList,
 		}
 	}
 
-	MPI_Allreduce(shellf, Shellf, NN * num_var, MPI_DOUBLE, MPI_SUM, Comm_here);
 	int *Weight;
 	Weight = new int[NN];
-	MPI_Allreduce(weight, Weight, NN, MPI_INT, MPI_SUM, Comm_here);
+	reduce_interp_values(shellf, weight, Shellf, Weight, NN * num_var, NN, Comm_here);
 
 	//  misc::tillherecheck("print me");
 	//  if(lmyrank == 0) cout<<"myrank = "<<myrank<<"print me"<<endl;

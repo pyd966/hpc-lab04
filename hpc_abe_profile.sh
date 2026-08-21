@@ -44,6 +44,7 @@ exec > >(tee "$PROFILE_DIR/job.log") 2>&1
 RANKS="${ABE_PROFILE_RANKS:-30}"
 OMP_THREADS="${ABE_PROFILE_OMP_THREADS:-1}"
 OPENMP_ENABLE="${ABE_PROFILE_OPENMP:-OFF}"
+PERF_FREQ="${ABE_PROFILE_FREQ:-99}"
 EVOLVE_TIME="${ABE_PROFILE_TIME:-4.0}"
 ABE_OPT="${AMSS_ABE_PROFILE_OPT:--O3 -g -fno-omit-frame-pointer -fopt-info-vec-optimized}"
 ABE_ARCH="${AMSS_ABE_ARCH_FLAGS:-}"
@@ -57,6 +58,7 @@ echo "MPI ranks: $RANKS"
 echo "OpenMP enabled: $OPENMP_ENABLE"
 echo "OpenMP threads per rank: $OMP_THREADS"
 echo "profile evolution interval: t=0..$EVOLVE_TIME"
+echo "perf record frequency: $PERF_FREQ Hz"
 echo "ABE flags: $ABE_OPT $ABE_ARCH"
 echo "TwoPuncture flags: $TWOP_OPT $TWOP_ARCH"
 
@@ -138,7 +140,7 @@ fi
 echo "=== perf record ==="
 : > "$PROFILE_DIR/record-rank-pids.tsv"
 set +e
-perf record -m 1 -F 99 --call-graph fp -o "$PROFILE_DIR/perf.data" -- \
+perf record -m 1 -F "$PERF_FREQ" --call-graph fp -o "$PROFILE_DIR/perf.data" -- \
     "${MPI_CMD[@]}" "$ROOT_DIR/hpc_abe_profile.sh" --rank-worker \
     "$RECORD_RUN" "$PROFILE_DIR/record-rank-pids.tsv" \
     2>&1 | tee "$PROFILE_DIR/record-run.log"

@@ -27,6 +27,33 @@ using namespace std;
 #endif
 
 #define PI M_PI
+
+// The original analysis path reduced the real and imaginary wave arrays in
+// separate collectives, and reduced the seven ADM quantities one scalar at a
+// time.  Keep the same SUM operation but use one collective per result set.
+static void reduce_wave_pair(double *local_real, double *local_imag,
+                             double *real_out, double *imag_out, int count,
+                             MPI_Comm comm)
+{
+    double *combined = new double[2 * count];
+    for (int i = 0; i < count; ++i)
+    {
+        combined[i] = local_real[i];
+        combined[count + i] = local_imag[i];
+    }
+    MPI_Allreduce(MPI_IN_PLACE, combined, 2 * count, MPI_DOUBLE, MPI_SUM, comm);
+    for (int i = 0; i < count; ++i)
+    {
+        real_out[i] = combined[i];
+        imag_out[i] = combined[count + i];
+    }
+    delete[] combined;
+}
+
+static void reduce_adm_quantities(const double *local, double *global, MPI_Comm comm)
+{
+    MPI_Allreduce(local, global, 7, MPI_DOUBLE, MPI_SUM, comm);
+}
 //|============================================================================
 //| Constructor
 //|============================================================================
@@ -360,8 +387,7 @@ void surface_integral::surf_Wave(double rex, int lev, cgh *GH, var *Rpsi4, var *
     }
     //|------+  Communicate and sum the results from each processor.
 
-    MPI_Allreduce(RP_out, RP, NN, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-    MPI_Allreduce(IP_out, IP, NN, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+    reduce_wave_pair(RP_out, IP_out, RP, IP, NN, MPI_COMM_WORLD);
 
     //|------= Free memory.
 
@@ -553,8 +579,7 @@ void surface_integral::surf_Wave(double rex, int lev, cgh *GH, var *Rpsi4, var *
     }
     //|------+  Communicate and sum the results from each processor.
 
-    MPI_Allreduce(RP_out, RP, NN, MPI_DOUBLE, MPI_SUM, Comm_here);
-    MPI_Allreduce(IP_out, IP, NN, MPI_DOUBLE, MPI_SUM, Comm_here);
+    reduce_wave_pair(RP_out, IP_out, RP, IP, NN, Comm_here);
 
     //|------= Free memory.
 
@@ -794,8 +819,7 @@ void surface_integral::surf_Wave(double rex, int lev, cgh *GH,
     }
     //|------+  Communicate and sum the results from each processor.
 
-    MPI_Allreduce(RP_out, RP, NN, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-    MPI_Allreduce(IP_out, IP, NN, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+    reduce_wave_pair(RP_out, IP_out, RP, IP, NN, MPI_COMM_WORLD);
 
     //|------= Free memory.
 
@@ -1009,15 +1033,17 @@ void surface_integral::surf_MassPAng(double rex, int lev, cgh *GH, var *chi, var
     }
   }
 
-  MPI_Allreduce(&Mass_out, &mass, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-
-  MPI_Allreduce(&ang_outx, &sx, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-  MPI_Allreduce(&ang_outy, &sy, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-  MPI_Allreduce(&ang_outz, &sz, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-
-  MPI_Allreduce(&p_outx, &px, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-  MPI_Allreduce(&p_outy, &py, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-  MPI_Allreduce(&p_outz, &pz, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+  double local_adm[7] = {Mass_out, p_outx, p_outy, p_outz,
+                         ang_outx, ang_outy, ang_outz};
+  double global_adm[7];
+  reduce_adm_quantities(local_adm, global_adm, MPI_COMM_WORLD);
+  mass = global_adm[0];
+  px = global_adm[1];
+  py = global_adm[2];
+  pz = global_adm[3];
+  sx = global_adm[4];
+  sy = global_adm[5];
+  sz = global_adm[6];
   mass = mass * rex * rex * dphi * factor;
 
   sx = sx * rex * rex * dphi * (1.0 / PI) * factor;
@@ -1241,15 +1267,17 @@ void surface_integral::surf_MassPAng(double rex, int lev, cgh *GH, var *chi, var
         }
     }
 
-    MPI_Allreduce(&Mass_out, &mass, 1, MPI_DOUBLE, MPI_SUM, Comm_here);
-
-    MPI_Allreduce(&ang_outx, &sx, 1, MPI_DOUBLE, MPI_SUM, Comm_here);
-    MPI_Allreduce(&ang_outy, &sy, 1, MPI_DOUBLE, MPI_SUM, Comm_here);
-    MPI_Allreduce(&ang_outz, &sz, 1, MPI_DOUBLE, MPI_SUM, Comm_here);
-
-    MPI_Allreduce(&p_outx, &px, 1, MPI_DOUBLE, MPI_SUM, Comm_here);
-    MPI_Allreduce(&p_outy, &py, 1, MPI_DOUBLE, MPI_SUM, Comm_here);
-    MPI_Allreduce(&p_outz, &pz, 1, MPI_DOUBLE, MPI_SUM, Comm_here);
+    double local_adm[7] = {Mass_out, p_outx, p_outy, p_outz,
+                           ang_outx, ang_outy, ang_outz};
+    double global_adm[7];
+    reduce_adm_quantities(local_adm, global_adm, Comm_here);
+    mass = global_adm[0];
+    px = global_adm[1];
+    py = global_adm[2];
+    pz = global_adm[3];
+    sx = global_adm[4];
+    sy = global_adm[5];
+    sz = global_adm[6];
 
     mass = mass * rex * rex * dphi * factor;
 
