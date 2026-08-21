@@ -7,8 +7,8 @@
 #HPC --output=profile/twopuncture_%x_%j.log
 #
 # Profile only the shared TwoPuncture initial-data solver.  TwoPunctureABE is
-# a serial executable; the 60-CPU allocation is used for a stable node and
-# does not imply 60 MPI ranks.
+# explicitly built without OpenMP; the 60-CPU allocation is used for a stable
+# node and does not imply 60 MPI ranks.
 set -euo pipefail
 
 # hpc submits a temporary copy of a script (often under /tmp), while keeping
@@ -47,6 +47,7 @@ export AMSS_BUILD_DIR="$BUILD_DIR"
 export JOBS="$(nproc)"
 ./compile.sh -DAMSS_ENABLE_GPU=OFF \
     -DAMSS_ENABLE_OPENMP=OFF \
+    -DAMSS_ENABLE_TWOPUNCTURE_OPENMP=OFF \
     -DAMSS_OPT="-O3 -g -fno-omit-frame-pointer"
 cp "$BUILD_DIR/TwoPunctureABE" "$RUN_DIR/TwoPunctureABE"
 

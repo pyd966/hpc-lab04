@@ -117,7 +117,8 @@ public:
        void SetMatrix_JFD(int nvar, int n1, int n2, int n3, derivs u, int *ncols, int **cols, double **Matrix);
        void J_times_dv(int nvar, int n1, int n2, int n3, derivs dv, double *Jdv, derivs u);
        void relax(double *dv, int const nvar, int const n1, int const n2, int const n3,
-                  double const *rhs, int const *ncols, int **cols, double **JFD);
+                  double const *rhs, int const *ncols, int **cols, double **JFD,
+                  int const iterations);
        void LineRelax_be(double *dv,
                          int const i, int const k, int const nvar,
                          int const n1, int const n2, int const n3,

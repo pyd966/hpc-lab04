@@ -51,7 +51,7 @@ for index in "${!names[@]}"; do
   mkdir -p "$run_dir"
 
   echo "=== Build $name: AMSS_OPT='$opt' AMSS_ARCH_FLAGS='$arch' ==="
-  cmake -S "$ROOT_DIR" -B "$build_dir" -DAMSS_ENABLE_GPU=OFF -DAMSS_ENABLE_OPENMP=OFF -DAMSS_TWOPUNCTURE_OPT="$opt" -DAMSS_TWOPUNCTURE_ARCH_FLAGS="$arch"
+  cmake -S "$ROOT_DIR" -B "$build_dir" -DAMSS_ENABLE_GPU=OFF -DAMSS_ENABLE_OPENMP=OFF -DAMSS_ENABLE_TWOPUNCTURE_OPENMP=OFF -DAMSS_TWOPUNCTURE_OPT="$opt" -DAMSS_TWOPUNCTURE_ARCH_FLAGS="$arch"
   cmake --build "$build_dir" --target TwoPunctureABE -j "$(nproc)"
   cp "$build_dir/TwoPunctureABE" "$run_dir/TwoPunctureABE"
   cp "$INPUT_DIR/TwoPunctureinput.par" "$run_dir/TwoPunctureinput.par"
