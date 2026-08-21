@@ -16,11 +16,11 @@ import numpy
 File_directory   = "GW250118"                    ## output file directory
 Output_directory = "binary_output"               ## binary data file directory
                                                  ## The file directory name should not be too long
-MPI_processes    = 30                            ## number of mpi processes used in the simulation
-OMP_threads      = 1
+MPI_processes    = 1                             ## one rank drives the single A100 MIG instance
+OMP_threads      = 16                            ## host threads used by the TwoPuncture stage
 
-GPU_Calculation  = "no"                          ## Use GPU or not
-                                                 ## (prefer "no" in the current version, because the GPU part may have bugs when integrated in this Python interface)
+GPU_Calculation  = "yes"                         ## Use GPU or not
+                                                 ## one ABEGPU rank drives the allocated MIG device
 
 #################################################
 
