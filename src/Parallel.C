@@ -5,6 +5,10 @@
 #include "misc.h"
 #include "parameters.h"
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 #ifdef USE_GPU
 #include "gpu_manager.h"
 #include "helper.h"
@@ -127,6 +131,12 @@ MyList<Block> *Parallel::distribute(
 ) {
     if (nodes == 0)
         nodes = cpusize;
+
+#ifdef _OPENMP
+    // Keep MPI ownership unchanged, but create enough independent blocks for
+    // the OpenMP workers on each rank to receive useful work.
+    nodes = Mymax(nodes, cpusize * omp_get_max_threads());
+#endif
 
     if (dim != 3)
     {

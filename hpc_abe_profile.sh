@@ -31,7 +31,8 @@ fi
 cd "$ROOT_DIR"
 mkdir -p profile
 
-RUN_ID="${HPC_JOB_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$BASHPID}"
+STAGE="${ABE_PROFILE_STAGE:-baseline}"
+RUN_ID="${HPC_JOB_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$BASHPID}-${STAGE}"
 PROFILE_DIR="$ROOT_DIR/profile/abe-$RUN_ID"
 BUILD_DIR="$PROFILE_DIR/build"
 PREP_ROOT="$PROFILE_DIR/prepare"
@@ -41,6 +42,8 @@ mkdir -p "$PROFILE_DIR" "$PREP_ROOT" "$CACHE_DIR"
 exec > >(tee "$PROFILE_DIR/job.log") 2>&1
 
 RANKS="${ABE_PROFILE_RANKS:-30}"
+OMP_THREADS="${ABE_PROFILE_OMP_THREADS:-1}"
+OPENMP_ENABLE="${ABE_PROFILE_OPENMP:-OFF}"
 EVOLVE_TIME="${ABE_PROFILE_TIME:-4.0}"
 ABE_OPT="${AMSS_ABE_PROFILE_OPT:--O3 -g -fno-omit-frame-pointer -fopt-info-vec-optimized}"
 ABE_ARCH="${AMSS_ABE_ARCH_FLAGS:-}"
@@ -48,8 +51,11 @@ TWOP_OPT="${AMSS_TWOPUNCTURE_OPT:--O3}"
 TWOP_ARCH="${AMSS_TWOPUNCTURE_ARCH_FLAGS:--march=native}"
 
 echo "profile directory: $PROFILE_DIR"
+echo "profile stage: $STAGE"
 echo "git revision: $(git rev-parse HEAD 2>/dev/null || echo unknown)"
 echo "MPI ranks: $RANKS"
+echo "OpenMP enabled: $OPENMP_ENABLE"
+echo "OpenMP threads per rank: $OMP_THREADS"
 echo "profile evolution interval: t=0..$EVOLVE_TIME"
 echo "ABE flags: $ABE_OPT $ABE_ARCH"
 echo "TwoPuncture flags: $TWOP_OPT $TWOP_ARCH"
@@ -57,7 +63,7 @@ echo "TwoPuncture flags: $TWOP_OPT $TWOP_ARCH"
 "$ROOT_DIR/scripts/collect_cpu_info.sh" > "$PROFILE_DIR/cpu-info.txt"
 
 export JOBS="$(nproc)"
-export OMP_NUM_THREADS=1
+export OMP_NUM_THREADS="$OMP_THREADS"
 export OMP_PLACES=cores
 export OMP_PROC_BIND=close
 export OMPI_ALLOW_RUN_AS_ROOT=1
@@ -68,7 +74,7 @@ echo "=== Build with symbols ==="
 set +e
 ./compile.sh \
     -DAMSS_ENABLE_GPU=OFF \
-    -DAMSS_ENABLE_OPENMP=OFF \
+    -DAMSS_ENABLE_OPENMP="$OPENMP_ENABLE" \
     -DAMSS_ENABLE_TWOPUNCTURE_OPENMP=ON \
     -DAMSS_OPT="$ABE_OPT" \
     -DAMSS_ARCH_FLAGS="$ABE_ARCH" \
@@ -110,7 +116,11 @@ RECORD_RUN="$PROFILE_DIR/record-run"
 stage_run "$STAT_RUN"
 stage_run "$RECORD_RUN"
 
-MPI_CMD=(mpiexec --allow-run-as-root --map-by core --bind-to core --report-bindings -n "$RANKS")
+if (( OMP_THREADS > 1 )); then
+    MPI_CMD=(mpiexec --allow-run-as-root --map-by "ppr:${RANKS}:node:PE=${OMP_THREADS}" --bind-to core --report-bindings -n "$RANKS")
+else
+    MPI_CMD=(mpiexec --allow-run-as-root --map-by core --bind-to core --report-bindings -n "$RANKS")
+fi
 
 echo "=== perf stat ==="
 : > "$PROFILE_DIR/stat-rank-pids.tsv"
