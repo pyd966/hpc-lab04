@@ -237,6 +237,13 @@ shutil.copy2(os.path.join(File_directory, "AMSS-NCKU.input"),
 ##################################################################
 ## Run the ABE evolution
 
+# Profiling jobs can stop here and launch ABE directly under perf. Keeping
+# preparation in the normal driver ensures the generated grid and physical
+# parameters are identical to a regular run.
+if os.environ.get("AMSS_NCKU_PREPARE_ONLY", "") == "1":
+    print(" ABE input preparation finished; skipping evolution")
+    sys.exit(0)
+
 try:
     os.chdir(output_directory)
     makefile_and_run.run_ABE()
