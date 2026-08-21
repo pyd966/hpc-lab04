@@ -47,6 +47,8 @@ export OMP_WAIT_POLICY=ACTIVE
 echo "logical CPUs in affinity: $logical_cpus"
 echo "physical cores in affinity: $physical_cores"
 echo "binding: OMP_PLACES=$OMP_PLACES OMP_PROC_BIND=$OMP_PROC_BIND"
+TWOP_OPT="${AMSS_TWOPUNCTURE_OPT:--O3}"
+echo "TwoPuncture optimization flags: $TWOP_OPT"
 
 INPUT_DIR="$PROFILE_DIR/input"
 mkdir -p "$INPUT_DIR"
@@ -65,6 +67,7 @@ cmake -S "$ROOT_DIR" -B "$BUILD_DIR" \
   -DAMSS_ENABLE_GPU=OFF \
   -DAMSS_ENABLE_OPENMP=OFF \
   -DAMSS_ENABLE_TWOPUNCTURE_OPENMP=ON \
+  -DAMSS_TWOPUNCTURE_OPT="$TWOP_OPT" \
   -DAMSS_OPT="-O3 -g -fno-omit-frame-pointer"
 cmake --build "$BUILD_DIR" --target TwoPunctureABE -j "$logical_cpus"
 
