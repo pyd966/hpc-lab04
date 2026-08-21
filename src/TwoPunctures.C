@@ -31,10 +31,25 @@ using namespace std;
 
 namespace
 {
+struct ChebyshevCoefficients
+{
+  int n = 0;
+  vector<double> forward, inverse;
+};
+
+struct FourierCoefficients
+{
+  int n = 0;
+  vector<double> forward_cos, forward_sin, inverse_cos, inverse_sin;
+};
+
 struct TransformWorkspace
 {
   vector<double> p, dp, d2p, q, dq, r, dr, result, four_a, four_b;
   vector<int> indx;
+  vector<ChebyshevCoefficients> chebyshev_zero_tables;
+  vector<ChebyshevCoefficients> chebyshev_extreme_tables;
+  vector<FourierCoefficients> fourier_tables;
 
   void ensure(int n)
   {
@@ -52,6 +67,78 @@ struct TransformWorkspace
     four_a.resize(size);
     four_b.resize(size);
     indx.resize(size);
+  }
+
+  ChebyshevCoefficients const &chebyshev_zeros(int n)
+  {
+    for (size_t i = 0; i < chebyshev_zero_tables.size(); ++i)
+      if (chebyshev_zero_tables[i].n == n)
+        return chebyshev_zero_tables[i];
+
+    chebyshev_zero_tables.emplace_back();
+    ChebyshevCoefficients &table = chebyshev_zero_tables.back();
+    table.n = n;
+    table.forward.resize(static_cast<size_t>(n) * n);
+    table.inverse.resize(static_cast<size_t>(n) * n);
+    double const Pion = Pi / n;
+    for (int j = 0; j < n; ++j)
+      for (int k = 0; k < n; ++k)
+      {
+        table.forward[static_cast<size_t>(j) * n + k] =
+            cos(Pion * j * (k + 0.5));
+        table.inverse[static_cast<size_t>(j) * n + k] =
+            cos(Pion * (j + 0.5) * k);
+      }
+    return table;
+  }
+
+  ChebyshevCoefficients const &chebyshev_extremes(int n)
+  {
+    for (size_t i = 0; i < chebyshev_extreme_tables.size(); ++i)
+      if (chebyshev_extreme_tables[i].n == n)
+        return chebyshev_extreme_tables[i];
+
+    chebyshev_extreme_tables.emplace_back();
+    ChebyshevCoefficients &table = chebyshev_extreme_tables.back();
+    table.n = n;
+    table.forward.resize(static_cast<size_t>(n) * n);
+    double const PioN = Pi / (n - 1);
+    for (int j = 0; j < n; ++j)
+      for (int k = 0; k < n; ++k)
+        table.forward[static_cast<size_t>(j) * n + k] = cos(PioN * j * k);
+    return table;
+  }
+
+  FourierCoefficients const &fourier(int n)
+  {
+    for (size_t i = 0; i < fourier_tables.size(); ++i)
+      if (fourier_tables[i].n == n)
+        return fourier_tables[i];
+
+    fourier_tables.emplace_back();
+    FourierCoefficients &table = fourier_tables.back();
+    table.n = n;
+    int const M = n / 2;
+    size_t const size = static_cast<size_t>(M + 1) * n;
+    table.forward_cos.resize(size);
+    table.forward_sin.resize(size);
+    table.inverse_cos.resize(size);
+    table.inverse_sin.resize(size);
+    double const fac = 1. / M;
+    double const Pi_fac = Pi * fac;
+    for (int l = 0; l <= M; ++l)
+      for (int k = 0; k < n; ++k)
+      {
+        double const forward_x = (Pi_fac * l) * k;
+        double const inverse_x = (Pi_fac * k) * l;
+        size_t const forward_index = static_cast<size_t>(l) * n + k;
+        size_t const inverse_index = static_cast<size_t>(k) * (M + 1) + l;
+        table.forward_cos[forward_index] = cos(forward_x);
+        table.forward_sin[forward_index] = sin(forward_x);
+        table.inverse_cos[inverse_index] = cos(inverse_x);
+        table.inverse_sin[inverse_index] = sin(inverse_x);
+      }
+    return table;
   }
 };
 
@@ -745,11 +832,12 @@ void TwoPunctures::chebft_Zeros(double u[], int n, int inv)
 /* eq. 5.8.7 and 5.8.8 at x = (5.8.4) of 2nd edition C++ NR */
 {
   int k, j, isignum;
-  double fac, sum, Pion, *c;
+  double fac, sum, *c;
 
   transform_workspace.ensure(n);
   c = transform_workspace.result.data();
-  Pion = Pi / n;
+  ChebyshevCoefficients const &coefficients =
+      transform_workspace.chebyshev_zeros(n);
   if (inv == 0)
   {
     fac = 2.0 / n;
@@ -757,8 +845,9 @@ void TwoPunctures::chebft_Zeros(double u[], int n, int inv)
     for (j = 0; j < n; j++)
     {
       sum = 0.0;
+      double const *cosines = coefficients.forward.data() + static_cast<size_t>(j) * n;
       for (k = 0; k < n; k++)
-        sum += u[k] * cos(Pion * j * (k + 0.5));
+        sum += u[k] * cosines[k];
       c[j] = fac * sum * isignum;
       isignum = -isignum;
     }
@@ -769,9 +858,10 @@ void TwoPunctures::chebft_Zeros(double u[], int n, int inv)
     {
       sum = -0.5 * u[0];
       isignum = 1;
+      double const *cosines = coefficients.inverse.data() + static_cast<size_t>(j) * n;
       for (k = 0; k < n; k++)
       {
-        sum += u[k] * cos(Pion * (j + 0.5) * k) * isignum;
+        sum += u[k] * cosines[k] * isignum;
         isignum = -isignum;
       }
       c[j] = sum;
@@ -786,11 +876,12 @@ void TwoPunctures::chebft_Extremes(double u[], int n, int inv)
 /* eq. 5.8.7 and 5.8.8 at x = (5.8.5) of 2nd edition C++ NR */
 {
   int k, j, isignum, N = n - 1;
-  double fac, sum, PioN, *c;
+  double fac, sum, *c;
 
   transform_workspace.ensure(N);
   c = transform_workspace.result.data();
-  PioN = Pi / N;
+  ChebyshevCoefficients const &coefficients =
+      transform_workspace.chebyshev_extremes(n);
   if (inv == 0)
   {
     fac = 2.0 / N;
@@ -798,8 +889,9 @@ void TwoPunctures::chebft_Extremes(double u[], int n, int inv)
     for (j = 0; j < n; j++)
     {
       sum = 0.5 * (u[0] + u[N] * isignum);
+      double const *cosines = coefficients.forward.data() + static_cast<size_t>(j) * n;
       for (k = 1; k < N; k++)
-        sum += u[k] * cos(PioN * j * k);
+        sum += u[k] * cosines[k];
       c[j] = fac * sum * isignum;
       isignum = -isignum;
     }
@@ -811,9 +903,10 @@ void TwoPunctures::chebft_Extremes(double u[], int n, int inv)
     {
       sum = -0.5 * u[0];
       isignum = 1;
+      double const *cosines = coefficients.forward.data() + static_cast<size_t>(j) * n;
       for (k = 0; k < n; k++)
       {
-        sum += u[k] * cos(PioN * j * k) * isignum;
+        sum += u[k] * cosines[k] * isignum;
         isignum = -isignum;
       }
       c[j] = sum;
@@ -863,14 +956,14 @@ void TwoPunctures::fourft(double *u, int N, int inv)
 /* a (slow) Fourier transform, seems to be just eq. 12.1.6 and 12.1.9 of C++ NR (2nd ed) */
 {
   int l, k, iy, M;
-  double x, x1, fac, Pi_fac, *a, *b;
+  double fac, *a, *b;
 
   M = N / 2;
   transform_workspace.ensure(M);
   a = transform_workspace.four_a.data();
   b = transform_workspace.four_b.data();
+  FourierCoefficients const &coefficients = transform_workspace.fourier(N);
   fac = 1. / M;
-  Pi_fac = Pi * fac;
   if (inv == 0)
   {
     for (l = 0; l <= M; l++)
@@ -878,13 +971,13 @@ void TwoPunctures::fourft(double *u, int N, int inv)
       a[l] = 0;
       if (l > 0 && l < M)
         b[l] = 0;
-      x1 = Pi_fac * l;
+      double const *cosines = coefficients.forward_cos.data() + static_cast<size_t>(l) * N;
+      double const *sines = coefficients.forward_sin.data() + static_cast<size_t>(l) * N;
       for (k = 0; k < N; k++)
       {
-        x = x1 * k;
-        a[l] += fac * u[k] * cos(x);
+        a[l] += fac * u[k] * cosines[k];
         if (l > 0 && l < M)
-          b[l] += fac * u[k] * sin(x);
+          b[l] += fac * u[k] * sines[k];
       }
     }
     u[0] = a[0];
@@ -908,12 +1001,10 @@ void TwoPunctures::fourft(double *u, int N, int inv)
     for (k = 0; k < N; k++)
     {
       u[k] = 0.5 * (a[0] + a[M] * iy);
-      x1 = Pi_fac * k;
+      double const *cosines = coefficients.inverse_cos.data() + static_cast<size_t>(k) * (M + 1);
+      double const *sines = coefficients.inverse_sin.data() + static_cast<size_t>(k) * (M + 1);
       for (l = 1; l < M; l++)
-      {
-        x = x1 * l;
-        u[k] += a[l] * cos(x) + b[l] * sin(x);
-      }
+        u[k] += a[l] * cosines[l] + b[l] * sines[l];
       iy = -iy;
     }
   }
