@@ -2595,12 +2595,23 @@ void omp_local_transfer(MyList<Parallel::gridseg> *src, MyList<Parallel::gridseg
     if (total_size == 0)
         return;
 
-    double *data = new double[total_size];
+    // The OpenMP-only control path enters transfers sequentially at
+    // synchronization boundaries. Reuse the largest packed workspace seen so
+    // far instead of allocating and freeing it for every RK/AMR transfer.
+    static vector<double> data_workspace;
+    if (data_workspace.size() < total_size)
+        data_workspace.resize(total_size);
+    double *data = data_workspace.data();
     int DIM = dim;
 
     // Preserve the MPI path's pack-before-unpack ordering. Packing only reads
     // grid data, so individual segment/variable operations are independent.
-    #pragma omp parallel for schedule(dynamic, 1) if (ops.size() > 1)
+    // One team handles both phases; the implicit barrier between the two omp
+    // for directives prevents UNPACK from overwriting a source before PACK
+    // has finished reading it.
+    #pragma omp parallel if (ops.size() > 1)
+    {
+    #pragma omp for schedule(dynamic, 1)
     for (int op_index = 0; op_index < static_cast<int>(ops.size()); ++op_index)
     {
         OmpLocalTransferOp &op = ops[op_index];
@@ -2636,7 +2647,7 @@ void omp_local_transfer(MyList<Parallel::gridseg> *src, MyList<Parallel::gridseg
 
     // Different variables own different arrays. Keep segment writes for one
     // variable ordered in case two boundary segments touch the same point.
-    #pragma omp parallel for schedule(static) if (src_vars.size() > 1)
+    #pragma omp for schedule(static)
     for (int var_index = 0; var_index < static_cast<int>(src_vars.size()); ++var_index)
     {
         for (size_t op_index = static_cast<size_t>(var_index);
@@ -2661,8 +2672,7 @@ void omp_local_transfer(MyList<Parallel::gridseg> *src, MyList<Parallel::gridseg
             }
         }
     }
-
-    delete[] data;
+    }
 }
 }
 #endif
