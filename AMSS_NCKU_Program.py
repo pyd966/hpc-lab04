@@ -114,8 +114,12 @@ for exe in (abe_built, twop_built):
         sys.exit(f" Missing executable: {exe}\n"
                  f" Build first:  cmake -B build -S .  &&  cmake --build build -j")
 
-## OpenMP threads per MPI rank (inherited by the mpirun child process)
-os.environ["OMP_NUM_THREADS"] = str(input_data.OMP_threads)
+## Preserve an explicit scheduler/job setting; the input-file value is only
+## the fallback for interactive runs.  In OpenMP-only mode there is one
+## process, regardless of the legacy MPI_processes input value.
+os.environ.setdefault("OMP_NUM_THREADS", str(input_data.OMP_threads))
+if os.environ.get("AMSS_OMP_ONLY_RUN", "0").lower() in ("1", "on", "true", "yes"):
+    input_data.MPI_processes = 1
 
 ## TwoPuncture initial-data cache (opt-in, for fast debugging)
 TWOP_CACHE   = os.environ.get("AMSS_NCKU_TWOP_CACHE", "") == "1"
