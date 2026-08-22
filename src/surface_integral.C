@@ -26,6 +26,10 @@ using namespace std;
 #include "helper.h"
 #endif
 
+#if defined(AMSS_OMP_ONLY) && !defined(USE_GPU)
+#include "surface_integral_omp.h"
+#endif
+
 #define PI M_PI
 //|============================================================================
 //| Constructor
@@ -34,6 +38,9 @@ using namespace std;
 surface_integral::surface_integral(int iSymmetry) : Symmetry(iSymmetry) {
     MPI_Comm_rank(MPI_COMM_WORLD, &myrank);
     MPI_Comm_size(MPI_COMM_WORLD, &cpusize);
+#if defined(AMSS_OMP_ONLY) && !defined(USE_GPU)
+    omp_analysis_cache = new OmpAnalysisCache;
+#endif
     int N = 40;
     // read parameter from file
     {
@@ -186,6 +193,9 @@ surface_integral::~surface_integral() {
     delete[] nz_g;
     delete[] arcostheta;
     delete[] wtcostheta;
+#if defined(AMSS_OMP_ONLY) && !defined(USE_GPU)
+    delete static_cast<OmpAnalysisCache *>(omp_analysis_cache);
+#endif
 #ifdef USE_GPU
     GPUManager::getInstance().free_device_memory(d_arcostheta, N_theta);
     GPUManager::getInstance().free_device_memory(d_wtcostheta, N_theta);
@@ -207,6 +217,14 @@ void surface_integral::surf_Wave(double rex, int lev, cgh *GH, var *Rpsi4, var *
             Monitor->outfile << "WARNING: surface integral on multipatches" << endl;
         else
             cout << "WARNING: surface integral on multipatches" << endl;
+
+#if defined(AMSS_OMP_ONLY) && !defined(USE_GPU)
+    omp_surface_wave(static_cast<OmpAnalysisCache *>(omp_analysis_cache),
+                     rex, lev, GH, Rpsi4, Ipsi4, spinw, maxl, NN, RP, IP,
+                     Symmetry, n_tot, N_phi, dphi, arcostheta, wtcostheta,
+                     nx_g, ny_g, nz_g);
+    return;
+#endif
 
     const int InList = 2;
 
@@ -824,6 +842,16 @@ void surface_integral::surf_MassPAng(double rex, int lev, cgh *GH, var *chi, var
       Monitor->outfile << "WARNING: surface integral on multipatches" << endl;
     else
       cout << "WARNING: surface integral on multipatches" << endl;
+
+#if defined(AMSS_OMP_ONLY) && !defined(USE_GPU)
+  omp_surface_adm(
+      static_cast<OmpAnalysisCache *>(omp_analysis_cache),
+      rex, lev, GH, chi, trK, gxx, gxy, gxz, gyy, gyz, gzz,
+      Axx, Axy, Axz, Ayy, Ayz, Azz, Gmx, Gmy, Gmz,
+      Sfx_rhs, Sfy_rhs, Sfz_rhs, Rout, Symmetry, factor,
+      n_tot, N_phi, dphi, wtcostheta, nx_g, ny_g, nz_g);
+  return;
+#endif
 
   double mass, px, py, pz, sx, sy, sz;
 
