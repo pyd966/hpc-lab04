@@ -14,7 +14,12 @@
 #   AMSS_JOB_MODE=topology hpc submit ./hpc_cpu.sh
 set -euo pipefail
 
-ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="${AMSS_ROOT_DIR:-$PWD}"
+if [[ ! -f "$ROOT_DIR/CMakeLists.txt" ]]; then
+    echo "submit this script from the repository root" >&2
+    exit 2
+fi
+ROOT_DIR="$(cd -- "$ROOT_DIR" && pwd)"
 MODE="${1:-${AMSS_JOB_MODE:-baseline}}"
 
 case "$MODE" in
