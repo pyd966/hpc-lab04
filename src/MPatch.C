@@ -408,10 +408,14 @@ void Patch::Interp_Points(MyList<var> *VarList,
     cudaFree(d_shellf);
     cudaFree(d_weight);
 #else
-    for (int j = 0; j < NN; j++)
+    // Each interpolation point writes a disjoint shellf/weight slot.
+    // Keep the patch list read-only and give every worker private geometry buffers.
+    #pragma omp parallel for schedule(static) if (NN > 1)
+    for (int j = 0; j < NN; ++j)
     {
-        double pox[dim];
-        for (int i = 0; i < dim; i++)
+        double pox[3];
+        double local_llb[3], local_uub[3];
+        for (int i = 0; i < dim; ++i)
             pox[i] = XX[i][j];
 
         MyList<Block> *Bp = blb;
@@ -419,14 +423,12 @@ void Patch::Interp_Points(MyList<var> *VarList,
         while (notfind && Bp)
         {
             Block *BP = Bp->data;
-
             bool flag = true;
-            for (int i = 0; i < dim; i++)
+            for (int i = 0; i < dim; ++i)
             {
-                llb[i] = (feq(BP->bbox[i], bbox[i], DH[i] / 2)) ? BP->bbox[i] + lli[i] * DH[i] : BP->bbox[i] + ghost_width * DH[i];
-                uub[i] = (feq(BP->bbox[dim + i], bbox[dim + i], DH[i] / 2)) ? BP->bbox[dim + i] - uui[i] * DH[i] : BP->bbox[dim + i] - ghost_width * DH[i];
-
-                if (XX[i][j] - llb[i] < -DH[i] / 2 || XX[i][j] - uub[i] > DH[i] / 2)
+                local_llb[i] = (feq(BP->bbox[i], bbox[i], DH[i] / 2)) ? BP->bbox[i] + lli[i] * DH[i] : BP->bbox[i] + ghost_width * DH[i];
+                local_uub[i] = (feq(BP->bbox[dim + i], bbox[dim + i], DH[i] / 2)) ? BP->bbox[dim + i] - uui[i] * DH[i] : BP->bbox[dim + i] - ghost_width * DH[i];
+                if (XX[i][j] - local_llb[i] < -DH[i] / 2 || XX[i][j] - local_uub[i] > DH[i] / 2)
                 {
                     flag = false;
                     break;
@@ -438,14 +440,14 @@ void Patch::Interp_Points(MyList<var> *VarList,
                 notfind = false;
                 if (myrank == BP->rank)
                 {
-                    varl = VarList;
+                    MyList<var> *local_varl = VarList;
                     int k = 0;
-                    while (varl)
+                    while (local_varl)
                     {
-                        f_global_interp(BP->shape, BP->X[0], BP->X[1], BP->X[2], BP->fgfs[varl->data->sgfn], shellf[j * num_var + k],
-                                        pox[0], pox[1], pox[2], ordn, varl->data->SoA, Symmetry);
-                        varl = varl->next;
-                        k++;
+                        f_global_interp(BP->shape, BP->X[0], BP->X[1], BP->X[2], BP->fgfs[local_varl->data->sgfn], shellf[j * num_var + k],
+                                        pox[0], pox[1], pox[2], ordn, local_varl->data->SoA, Symmetry);
+                        local_varl = local_varl->next;
+                        ++k;
                     }
                     weight[j] = 1;
                 }

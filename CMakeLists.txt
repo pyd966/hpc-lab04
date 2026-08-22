@@ -8,6 +8,7 @@ set(AMSS_ARCH_FLAGS "" CACHE STRING "Architecture-specific compiler flags")
 set(AMSS_TWOPUNCTURE_OPT "-O3" CACHE STRING "TwoPuncture-only optimization level")
 set(AMSS_TWOPUNCTURE_ARCH_FLAGS "-march=native" CACHE STRING "TwoPuncture-only architecture flags")
 option(AMSS_ENABLE_OPENMP "Link OpenMP to all executables" OFF)
+option(AMSS_ENABLE_OMP_ONLY "Build the CPU ABE target as one OpenMP-only process" OFF)
 option(AMSS_ENABLE_TWOPUNCTURE_OPENMP "Enable OpenMP for TwoPunctureABE" ON)
 set(AMSS_MPI_CUDA_AWARE 0 CACHE STRING "Set MPI_CUDA_AWARE macro for ABEGPU (0/1)")
 set_property(CACHE AMSS_MPI_CUDA_AWARE PROPERTY STRINGS 0 1)
@@ -35,6 +36,10 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/src)
 # --- MPI --------------------------------------------------------------------
 find_package(MPI REQUIRED COMPONENTS CXX)
 
+if(AMSS_ENABLE_OMP_ONLY)
+  set(AMSS_ENABLE_OPENMP ON CACHE BOOL "Link OpenMP to all executables" FORCE)
+endif()
+
 # --- Shared Fortran sources -------------------------------------------------
 set(AMSS_F90SOURCES
   src/bssn_rhs.f90
@@ -56,7 +61,16 @@ set(ABE_SOURCES
   ${AMSS_F90SOURCES}
 )
 add_executable(ABE ${ABE_SOURCES})
-target_link_libraries(ABE PRIVATE MPI::MPI_CXX)
+if(AMSS_ENABLE_OMP_ONLY)
+  target_compile_definitions(ABE PRIVATE AMSS_OMP_ONLY)
+  # Keep MPI public type declarations for the compatibility shim without linking MPI runtime.
+  target_include_directories(ABE PRIVATE ${MPI_CXX_INCLUDE_DIRS})
+  target_compile_options(ABE PRIVATE
+    "$<$<COMPILE_LANGUAGE:CXX>:-include${CMAKE_CURRENT_SOURCE_DIR}/src/omp_only_mpi.h>"
+  )
+else()
+  target_link_libraries(ABE PRIVATE MPI::MPI_CXX)
+endif()
 
 # --- TwoPunctureABE: initial-data solver -----------------------------------
 add_executable(TwoPunctureABE src/TwoPunctureABE.C src/TwoPunctures.C)
@@ -124,7 +138,7 @@ if(AMSS_ENABLE_GPU)
 else()
   message(STATUS "GPU      : OFF")
 endif()
-message(STATUS "AMSS_OPT=${AMSS_OPT} ARCH_FLAGS=${AMSS_ARCH_FLAGS} OPENMP=${AMSS_ENABLE_OPENMP} MPI_CUDA_AWARE=${AMSS_MPI_CUDA_AWARE}")
+message(STATUS "AMSS_OPT=${AMSS_OPT} ARCH_FLAGS=${AMSS_ARCH_FLAGS} OPENMP=${AMSS_ENABLE_OPENMP} OMP_ONLY=${AMSS_ENABLE_OMP_ONLY} MPI_CUDA_AWARE=${AMSS_MPI_CUDA_AWARE}")
 message(STATUS "TWOP_OPT=${AMSS_TWOPUNCTURE_OPT} TWOP_ARCH=${AMSS_TWOPUNCTURE_ARCH_FLAGS}")
 message(STATUS "TWOP_OPENMP=${AMSS_ENABLE_TWOPUNCTURE_OPENMP}")
 message(STATUS "==========================================================")

@@ -5,9 +5,15 @@
 #include <string>
 #include <cstring> 
 #include <iostream>
+#include <vector>
+#include <utility>
 using namespace std;
 
 #include <time.h>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 #include "macrodef.h"
 #include "misc.h"
@@ -1822,16 +1828,28 @@ void bssn_class::Step(int lev, int YN)
   int pre = 0, cor = 1;
   int ERROR = 0;
 
-  // Predictor
-  MyList<Patch> *Pp = GH->PatL[lev];
-  while (Pp)
+  // Build the local work list once.  MPI ownership is fixed for the whole
+  // RK4 step, so each OpenMP phase can use the same list without calling MPI
+  // from worker threads.
+  vector<pair<Patch *, Block *> > omp_blocks;
+  for (MyList<Patch> *patch_list = GH->PatL[lev]; patch_list; patch_list = patch_list->next)
   {
-    MyList<Block> *BP = Pp->data->blb;
-    while (BP)
+    for (MyList<Block> *block_list = patch_list->data->blb; block_list; block_list = block_list->next)
     {
-      Block *cg = BP->data;
-      if (myrank == cg->rank)
-      {
+      if (myrank == block_list->data->rank)
+        omp_blocks.push_back(make_pair(patch_list->data, block_list->data));
+      if (block_list == patch_list->data->ble)
+        break;
+    }
+  }
+  MyList<Patch> *Pp = 0;
+
+  // Predictor
+  #pragma omp parallel for schedule(static) if (omp_blocks.size() > 1)
+  for (int block_index = 0; block_index < static_cast<int>(omp_blocks.size()); ++block_index)
+  {
+    Patch *patch = omp_blocks[block_index].first;
+    Block *cg = omp_blocks[block_index].second;
         f_enforce_ga(cg->shape,
                      cg->fgfs[gxx0->sgfn], cg->fgfs[gxy0->sgfn], cg->fgfs[gxz0->sgfn], 
                      cg->fgfs[gyy0->sgfn], cg->fgfs[gyz0->sgfn], cg->fgfs[gzz0->sgfn],
@@ -1873,11 +1891,16 @@ void bssn_class::Step(int lev, int YN)
                                cg->fgfs[Cons_Gx->sgfn], cg->fgfs[Cons_Gy->sgfn], cg->fgfs[Cons_Gz->sgfn],
                                Symmetry, lev, ndeps, pre))
         {
-          cout << "find NaN in domain: (" 
-               << cg->bbox[0] << ":" << cg->bbox[3] << "," 
-               << cg->bbox[1] << ":" << cg->bbox[4] << ","
-               << cg->bbox[2] << ":" << cg->bbox[5] << ")" << endl;
-          ERROR = 1;
+          #ifdef _OPENMP
+          #pragma omp critical(abe_error)
+          #endif
+          {
+            cout << "find NaN in domain: ("
+                 << cg->bbox[0] << ":" << cg->bbox[3] << ","
+                 << cg->bbox[1] << ":" << cg->bbox[4] << ","
+                 << cg->bbox[2] << ":" << cg->bbox[5] << ")" << endl;
+            ERROR = 1;
+          }
         }
 
         // rk4 substep and boundary
@@ -1887,8 +1910,8 @@ void bssn_class::Step(int lev, int YN)
           {
             if (lev == 0) // sommerfeld indeed
               f_sommerfeld_routbam(cg->shape, cg->X[0], cg->X[1], cg->X[2],
-                                   Pp->data->bbox[0], Pp->data->bbox[1], Pp->data->bbox[2], 
-                                   Pp->data->bbox[3], Pp->data->bbox[4], Pp->data->bbox[5],
+                                   patch->bbox[0], patch->bbox[1], patch->bbox[2],
+                                   patch->bbox[3], patch->bbox[4], patch->bbox[5],
                                    cg->fgfs[varlrhs->data->sgfn],
                                    cg->fgfs[varl0->data->sgfn], 
                                    varl0->data->propspeed, varl0->data->SoA,
@@ -1901,8 +1924,8 @@ void bssn_class::Step(int lev, int YN)
                                iter_count);
             if (lev > 0) // fix BD point
               f_sommerfeld_rout(cg->shape, cg->X[0], cg->X[1], cg->X[2],
-                                Pp->data->bbox[0], Pp->data->bbox[1], Pp->data->bbox[2], 
-                                Pp->data->bbox[3], Pp->data->bbox[4], Pp->data->bbox[5],
+                                patch->bbox[0], patch->bbox[1], patch->bbox[2],
+                                patch->bbox[3], patch->bbox[4], patch->bbox[5],
                                 dT_lev, 
                                 cg->fgfs[phi0->sgfn],
                                 cg->fgfs[Lap0->sgfn], 
@@ -1917,12 +1940,6 @@ void bssn_class::Step(int lev, int YN)
           }
         }
         f_lowerboundset(cg->shape, cg->fgfs[phi->sgfn], chitiny);
-      }
-      if (BP == Pp->data->ble)
-        break;
-      BP = BP->next;
-    }
-    Pp = Pp->next;
   }
   // check error information
   {
@@ -1949,15 +1966,11 @@ void bssn_class::Step(int lev, int YN)
     // for RK4: t0, t0+dt/2, t0+dt/2, t0+dt;
     if (iter_count == 1 || iter_count == 3)
       TRK4 += dT_lev / 2;
-    Pp = GH->PatL[lev];
-    while (Pp)
+    #pragma omp parallel for schedule(static) if (omp_blocks.size() > 1)
+    for (int block_index = 0; block_index < static_cast<int>(omp_blocks.size()); ++block_index)
     {
-      MyList<Block> *BP = Pp->data->blb;
-      while (BP)
-      {
-        Block *cg = BP->data;
-        if (myrank == cg->rank)
-        {
+      Patch *patch = omp_blocks[block_index].first;
+      Block *cg = omp_blocks[block_index].second;
           f_enforce_ga(cg->shape,
                        cg->fgfs[gxx->sgfn], cg->fgfs[gxy->sgfn], cg->fgfs[gxz->sgfn], 
                        cg->fgfs[gyy->sgfn], cg->fgfs[gyz->sgfn], cg->fgfs[gzz->sgfn],
@@ -1999,11 +2012,16 @@ void bssn_class::Step(int lev, int YN)
                                  cg->fgfs[Cons_Gx->sgfn], cg->fgfs[Cons_Gy->sgfn], cg->fgfs[Cons_Gz->sgfn],
                                  Symmetry, lev, ndeps, cor))
           {
-            cout << "find NaN in domain: (" 
-                 << cg->bbox[0] << ":" << cg->bbox[3] << "," 
-                 << cg->bbox[1] << ":" << cg->bbox[4] << ","
-                 << cg->bbox[2] << ":" << cg->bbox[5] << ")" << endl;
-            ERROR = 1;
+            #ifdef _OPENMP
+            #pragma omp critical(abe_error)
+            #endif
+            {
+              cout << "find NaN in domain: ("
+                   << cg->bbox[0] << ":" << cg->bbox[3] << ","
+                   << cg->bbox[1] << ":" << cg->bbox[4] << ","
+                   << cg->bbox[2] << ":" << cg->bbox[5] << ")" << endl;
+              ERROR = 1;
+            }
           }
           // rk4 substep and boundary
           {
@@ -2012,8 +2030,8 @@ void bssn_class::Step(int lev, int YN)
             {
               if (lev == 0) // sommerfeld indeed
                 f_sommerfeld_routbam(cg->shape, cg->X[0], cg->X[1], cg->X[2],
-                                     Pp->data->bbox[0], Pp->data->bbox[1], Pp->data->bbox[2], 
-                                     Pp->data->bbox[3], Pp->data->bbox[4], Pp->data->bbox[5],
+                                     patch->bbox[0], patch->bbox[1], patch->bbox[2],
+                                     patch->bbox[3], patch->bbox[4], patch->bbox[5],
                                      cg->fgfs[varl1->data->sgfn],
                                      cg->fgfs[varl->data->sgfn], varl0->data->propspeed, varl0->data->SoA,
                                      Symmetry);
@@ -2025,8 +2043,8 @@ void bssn_class::Step(int lev, int YN)
 
               if (lev > 0) // fix BD point
                 f_sommerfeld_rout(cg->shape, cg->X[0], cg->X[1], cg->X[2],
-                                  Pp->data->bbox[0], Pp->data->bbox[1], Pp->data->bbox[2], 
-                                  Pp->data->bbox[3], Pp->data->bbox[4], Pp->data->bbox[5],
+                                  patch->bbox[0], patch->bbox[1], patch->bbox[2],
+                                  patch->bbox[3], patch->bbox[4], patch->bbox[5],
                                   dT_lev, 
                                   cg->fgfs[phi0->sgfn],
                                   cg->fgfs[Lap0->sgfn], 
@@ -2042,12 +2060,6 @@ void bssn_class::Step(int lev, int YN)
             }
           }
           f_lowerboundset(cg->shape, cg->fgfs[phi1->sgfn], chitiny);
-        }
-        if (BP == Pp->data->ble)
-          break;
-        BP = BP->next;
-      }
-      Pp = Pp->next;
     }
 
     // check error information
@@ -2075,19 +2087,11 @@ void bssn_class::Step(int lev, int YN)
     // swap time level
     if (iter_count < 3)
     {
-      Pp = GH->PatL[lev];
-      while (Pp)
+      #pragma omp parallel for schedule(static) if (omp_blocks.size() > 1)
+      for (int block_index = 0; block_index < static_cast<int>(omp_blocks.size()); ++block_index)
       {
-        MyList<Block> *BP = Pp->data->blb;
-        while (BP)
-        {
-          Block *cg = BP->data;
-          cg->swapList(SynchList_pre, SynchList_cor, myrank);
-          if (BP == Pp->data->ble)
-            break;
-          BP = BP->next;
-        }
-        Pp = Pp->next;
+        Block *cg = omp_blocks[block_index].second;
+        cg->swapList(SynchList_pre, SynchList_cor, myrank);
       }
     }
   }
@@ -2462,16 +2466,22 @@ void bssn_class::Compute_Psi4(int lev)
   MyList<var> *DG_List = new MyList<var>(Rpsi4);
   DG_List->insert(Ipsi4);
 
-  MyList<Patch> *Pp = GH->PatL[lev];
-
-  while (Pp)
+  vector<Block *> psi4_blocks;
+  for (MyList<Patch> *patch_list = GH->PatL[lev]; patch_list; patch_list = patch_list->next)
   {
-    MyList<Block> *BP = Pp->data->blb;
-    while (BP)
+    for (MyList<Block> *block_list = patch_list->data->blb; block_list; block_list = block_list->next)
     {
-      Block *cg = BP->data;
-      if (myrank == cg->rank)
-      {
+      if (myrank == block_list->data->rank)
+        psi4_blocks.push_back(block_list->data);
+      if (block_list == patch_list->data->ble)
+        break;
+    }
+  }
+
+  #pragma omp parallel for schedule(static) if (psi4_blocks.size() > 1)
+  for (int block_index = 0; block_index < static_cast<int>(psi4_blocks.size()); ++block_index)
+  {
+      Block *cg = psi4_blocks[block_index];
         // the input arguments Gamma^i_jk and R_ij do not need synch, because we do not need to derivate them
         f_getnp4(cg->shape, cg->X[0], cg->X[1], cg->X[2],
                  cg->fgfs[phi0->sgfn], cg->fgfs[trK0->sgfn],
@@ -2489,13 +2499,6 @@ void bssn_class::Compute_Psi4(int lev)
                  cg->fgfs[Ryy->sgfn], cg->fgfs[Ryz->sgfn], cg->fgfs[Rzz->sgfn],
                  cg->fgfs[Rpsi4->sgfn], cg->fgfs[Ipsi4->sgfn],
                  Symmetry);
-
-      }
-      if (BP == Pp->data->ble)
-        break;
-      BP = BP->next;
-    }
-    Pp = Pp->next;
   }
 
   Parallel::Sync(GH->PatL[lev], DG_List, Symmetry);

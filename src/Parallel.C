@@ -5,6 +5,10 @@
 #include "misc.h"
 #include "parameters.h"
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 #ifdef USE_GPU
 #include "gpu_manager.h"
 #include "helper.h"
@@ -127,6 +131,11 @@ MyList<Block> *Parallel::distribute(
 ) {
     if (nodes == 0)
         nodes = cpusize;
+
+#ifdef AMSS_OMP_ONLY
+    // In the single-process build, use extra blocks as OpenMP work units.
+    nodes = Mymax(nodes, omp_get_max_threads());
+#endif
 
     if (dim != 3)
     {
@@ -2516,6 +2525,17 @@ void Parallel::transfer(MyList<Parallel::gridseg> **src, MyList<Parallel::gridse
     int myrank, cpusize;
     MPI_Comm_size(MPI_COMM_WORLD, &cpusize);
     MPI_Comm_rank(MPI_COMM_WORLD, &myrank);
+    if (cpusize == 1) {
+        int length = data_packer(0, src[0], dst[0], 0, PACK, VarList1, VarList2, Symmetry);
+        if (length) {
+            double *local_data = new double[length];
+            data_packer(local_data, src[0], dst[0], 0, PACK, VarList1, VarList2, Symmetry);
+            data_packer(local_data, src[0], dst[0], 0, UNPACK, VarList1, VarList2, Symmetry);
+            delete[] local_data;
+        }
+        return;
+    }
+
 
     int node;
 
@@ -2601,6 +2621,17 @@ void Parallel::transfermix(MyList<Parallel::gridseg> **src, MyList<Parallel::gri
     int myrank, cpusize;
     MPI_Comm_size(MPI_COMM_WORLD, &cpusize);
     MPI_Comm_rank(MPI_COMM_WORLD, &myrank);
+    if (cpusize == 1) {
+        int length = data_packermix(0, src[0], dst[0], 0, PACK, VarList1, VarList2, Symmetry);
+        if (length) {
+            double *local_data = new double[length];
+            data_packermix(local_data, src[0], dst[0], 0, PACK, VarList1, VarList2, Symmetry);
+            data_packermix(local_data, src[0], dst[0], 0, UNPACK, VarList1, VarList2, Symmetry);
+            delete[] local_data;
+        }
+        return;
+    }
+
 
     int node;
 
