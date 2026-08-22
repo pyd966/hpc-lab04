@@ -4,6 +4,8 @@
 #include "prolongrestrict.h"
 #include "misc.h"
 #include "parameters.h"
+#include <vector>
+
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -2518,6 +2520,152 @@ int Parallel::data_packermix(double *data, MyList<Parallel::gridseg> *src, MyLis
     return size_out;
 }
 
+#ifdef AMSS_OMP_ONLY
+namespace
+{
+struct OmpLocalTransferOp
+{
+    Parallel::gridseg *src;
+    Parallel::gridseg *dst;
+    var *src_var;
+    var *dst_var;
+    size_t offset;
+    size_t size;
+};
+
+void omp_local_transfer(MyList<Parallel::gridseg> *src, MyList<Parallel::gridseg> *dst,
+                        MyList<var> *VarList1, MyList<var> *VarList2,
+                        int Symmetry, bool mixed)
+{
+    if (!src || !dst)
+        return;
+
+    vector<var *> src_vars;
+    vector<var *> dst_vars;
+    MyList<var> *varls = VarList1;
+    MyList<var> *varld = VarList2;
+    while (varls && varld)
+    {
+        src_vars.push_back(varls->data);
+        dst_vars.push_back(varld->data);
+        varls = varls->next;
+        varld = varld->next;
+    }
+    if (varls || varld)
+    {
+        cout << "omp_local_transfer: variable lists do not match." << endl;
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+
+    const int type = src->data->Bg->lev == dst->data->Bg->lev ? 1 :
+                     (src->data->Bg->lev > dst->data->Bg->lev ? 2 : 3);
+    if (mixed && type != 3)
+    {
+        cout << "omp_local_transfer: mixed transfer requires prolongation." << endl;
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+
+    vector<OmpLocalTransferOp> ops;
+    size_t total_size = 0;
+    while (src && dst)
+    {
+        for (size_t var_index = 0; var_index < src_vars.size(); ++var_index)
+        {
+            OmpLocalTransferOp op;
+            op.src = src->data;
+            op.dst = dst->data;
+            op.src_var = src_vars[var_index];
+            op.dst_var = dst_vars[var_index];
+            op.offset = total_size;
+            if (mixed)
+                op.size = static_cast<size_t>(op.src->shape[0] + 2 * ghost_width) *
+                          static_cast<size_t>(op.src->shape[1] + 2 * ghost_width) *
+                          static_cast<size_t>(op.src->shape[2] + 2 * ghost_width);
+            else
+                op.size = static_cast<size_t>(op.dst->shape[0]) *
+                          static_cast<size_t>(op.dst->shape[1]) *
+                          static_cast<size_t>(op.dst->shape[2]);
+            total_size += op.size;
+            ops.push_back(op);
+        }
+        src = src->next;
+        dst = dst->next;
+    }
+
+    if (total_size == 0)
+        return;
+
+    double *data = new double[total_size];
+    int DIM = dim;
+
+    // Preserve the MPI path's pack-before-unpack ordering. Packing only reads
+    // grid data, so individual segment/variable operations are independent.
+    #pragma omp parallel for schedule(dynamic, 1) if (ops.size() > 1)
+    for (int op_index = 0; op_index < static_cast<int>(ops.size()); ++op_index)
+    {
+        OmpLocalTransferOp &op = ops[op_index];
+        double *packed = data + op.offset;
+        if (mixed)
+        {
+            f_prolongcopy3(DIM, op.src->Bg->bbox, op.src->Bg->bbox + dim,
+                           op.src->Bg->shape, op.src->Bg->fgfs[op.src_var->sgfn],
+                           op.dst->llb, op.dst->uub, op.src->shape, packed,
+                           op.src->llb, op.src->uub, op.src_var->SoA, Symmetry);
+        }
+        else if (type == 1)
+        {
+            f_copy(DIM, op.dst->llb, op.dst->uub, op.dst->shape, packed,
+                   op.src->Bg->bbox, op.src->Bg->bbox + dim, op.src->Bg->shape,
+                   op.src->Bg->fgfs[op.src_var->sgfn], op.dst->llb, op.dst->uub);
+        }
+        else if (type == 2)
+        {
+            f_restrict3(DIM, op.dst->llb, op.dst->uub, op.dst->shape, packed,
+                        op.src->Bg->bbox, op.src->Bg->bbox + dim, op.src->Bg->shape,
+                        op.src->Bg->fgfs[op.src_var->sgfn], op.dst->llb, op.dst->uub,
+                        op.src_var->SoA, Symmetry);
+        }
+        else
+        {
+            f_prolong3(DIM, op.src->Bg->bbox, op.src->Bg->bbox + dim,
+                       op.src->Bg->shape, op.src->Bg->fgfs[op.src_var->sgfn],
+                       op.dst->llb, op.dst->uub, op.dst->shape, packed,
+                       op.dst->llb, op.dst->uub, op.src_var->SoA, Symmetry);
+        }
+    }
+
+    // Different variables own different arrays. Keep segment writes for one
+    // variable ordered in case two boundary segments touch the same point.
+    #pragma omp parallel for schedule(static) if (src_vars.size() > 1)
+    for (int var_index = 0; var_index < static_cast<int>(src_vars.size()); ++var_index)
+    {
+        for (size_t op_index = static_cast<size_t>(var_index);
+             op_index < ops.size(); op_index += src_vars.size())
+        {
+            OmpLocalTransferOp &op = ops[op_index];
+            double *packed = data + op.offset;
+            if (mixed)
+            {
+                f_prolongmix3(DIM, op.dst->Bg->bbox, op.dst->Bg->bbox + dim,
+                              op.dst->Bg->shape, op.dst->Bg->fgfs[op.dst_var->sgfn],
+                              op.src->llb, op.src->uub, op.src->shape, packed,
+                              op.dst->llb, op.dst->uub, op.src_var->SoA, Symmetry,
+                              op.dst->illb, op.dst->iuub);
+            }
+            else
+            {
+                f_copy(DIM, op.dst->Bg->bbox, op.dst->Bg->bbox + dim,
+                       op.dst->Bg->shape, op.dst->Bg->fgfs[op.dst_var->sgfn],
+                       op.dst->llb, op.dst->uub, op.dst->shape, packed,
+                       op.dst->llb, op.dst->uub);
+            }
+        }
+    }
+
+    delete[] data;
+}
+}
+#endif
 void Parallel::transfer(MyList<Parallel::gridseg> **src, MyList<Parallel::gridseg> **dst,
                                                 MyList<var> *VarList1 /* source */, MyList<var> *VarList2 /*target */,
                                                 int Symmetry)
@@ -2526,6 +2674,9 @@ void Parallel::transfer(MyList<Parallel::gridseg> **src, MyList<Parallel::gridse
     MPI_Comm_size(MPI_COMM_WORLD, &cpusize);
     MPI_Comm_rank(MPI_COMM_WORLD, &myrank);
     if (cpusize == 1) {
+#ifdef AMSS_OMP_ONLY
+        omp_local_transfer(src[0], dst[0], VarList1, VarList2, Symmetry, false);
+#else
         int length = data_packer(0, src[0], dst[0], 0, PACK, VarList1, VarList2, Symmetry);
         if (length) {
             double *local_data = new double[length];
@@ -2533,6 +2684,7 @@ void Parallel::transfer(MyList<Parallel::gridseg> **src, MyList<Parallel::gridse
             data_packer(local_data, src[0], dst[0], 0, UNPACK, VarList1, VarList2, Symmetry);
             delete[] local_data;
         }
+#endif
         return;
     }
 
@@ -2622,6 +2774,9 @@ void Parallel::transfermix(MyList<Parallel::gridseg> **src, MyList<Parallel::gri
     MPI_Comm_size(MPI_COMM_WORLD, &cpusize);
     MPI_Comm_rank(MPI_COMM_WORLD, &myrank);
     if (cpusize == 1) {
+#ifdef AMSS_OMP_ONLY
+        omp_local_transfer(src[0], dst[0], VarList1, VarList2, Symmetry, true);
+#else
         int length = data_packermix(0, src[0], dst[0], 0, PACK, VarList1, VarList2, Symmetry);
         if (length) {
             double *local_data = new double[length];
@@ -2629,6 +2784,7 @@ void Parallel::transfermix(MyList<Parallel::gridseg> **src, MyList<Parallel::gri
             data_packermix(local_data, src[0], dst[0], 0, UNPACK, VarList1, VarList2, Symmetry);
             delete[] local_data;
         }
+#endif
         return;
     }
 
@@ -3221,41 +3377,42 @@ void Parallel::prepare_inter_time_level(Patch *Pat,
     int myrank = 0;
     MPI_Comm_rank(MPI_COMM_WORLD, &myrank);
 
-    MyList<var> *varl1;
-    MyList<var> *varl2;
-    MyList<var> *varl3;
-
+    vector<Block *> local_blocks;
     MyList<Block> *BP = Pat->blb;
     while (BP)
     {
         Block *cg = BP->data;
         if (myrank == cg->rank)
-        {
-            varl1 = VarList1;
-            varl2 = VarList2;
-            varl3 = VarList3;
-            while (varl1)
-            {
-                if (tindex == 0)
-                    f_average(cg->shape, cg->fgfs[varl1->data->sgfn], cg->fgfs[varl2->data->sgfn], cg->fgfs[varl3->data->sgfn]);
-                else if (tindex == 1)
-                    f_average3(cg->shape, cg->fgfs[varl1->data->sgfn], cg->fgfs[varl2->data->sgfn], cg->fgfs[varl3->data->sgfn]);
-                else if (tindex == -1)
-                    // just change data order to use average3
-                    f_average3(cg->shape, cg->fgfs[varl2->data->sgfn], cg->fgfs[varl1->data->sgfn], cg->fgfs[varl3->data->sgfn]);
-                else
-                {
-                    cout << "error tindex in Parallel::prepare_inter_time_level" << endl;
-                    MPI_Abort(MPI_COMM_WORLD, 1);
-                }
-                varl1 = varl1->next;
-                varl2 = varl2->next;
-                varl3 = varl3->next;
-            }
-        }
+            local_blocks.push_back(cg);
         if (BP == Pat->ble)
             break;
         BP = BP->next;
+    }
+
+    #pragma omp parallel for schedule(static) if (local_blocks.size() > 1)
+    for (int block_index = 0; block_index < static_cast<int>(local_blocks.size()); ++block_index)
+    {
+        Block *cg = local_blocks[block_index];
+        MyList<var> *varl1 = VarList1;
+        MyList<var> *varl2 = VarList2;
+        MyList<var> *varl3 = VarList3;
+        while (varl1)
+        {
+            if (tindex == 0)
+                f_average(cg->shape, cg->fgfs[varl1->data->sgfn], cg->fgfs[varl2->data->sgfn], cg->fgfs[varl3->data->sgfn]);
+            else if (tindex == 1)
+                f_average3(cg->shape, cg->fgfs[varl1->data->sgfn], cg->fgfs[varl2->data->sgfn], cg->fgfs[varl3->data->sgfn]);
+            else if (tindex == -1)
+                f_average3(cg->shape, cg->fgfs[varl2->data->sgfn], cg->fgfs[varl1->data->sgfn], cg->fgfs[varl3->data->sgfn]);
+            else
+            {
+                cout << "error tindex in Parallel::prepare_inter_time_level" << endl;
+                MPI_Abort(MPI_COMM_WORLD, 1);
+            }
+            varl1 = varl1->next;
+            varl2 = varl2->next;
+            varl3 = varl3->next;
+        }
     }
 }
 void Parallel::prepare_inter_time_level(MyList<Patch> *PatL,
@@ -3275,46 +3432,47 @@ void Parallel::prepare_inter_time_level(Patch *Pat,
     int myrank = 0;
     MPI_Comm_rank(MPI_COMM_WORLD, &myrank);
 
-    MyList<var> *varl1;
-    MyList<var> *varl2;
-    MyList<var> *varl3;
-    MyList<var> *varl4;
-
+    vector<Block *> local_blocks;
     MyList<Block> *BP = Pat->blb;
     while (BP)
     {
         Block *cg = BP->data;
         if (myrank == cg->rank)
-        {
-            varl1 = VarList1;
-            varl2 = VarList2;
-            varl3 = VarList3;
-            varl4 = VarList4;
-            while (varl1)
-            {
-                if (tindex == 0)
-                    f_average2(cg->shape, cg->fgfs[varl1->data->sgfn], cg->fgfs[varl2->data->sgfn],
-                                         cg->fgfs[varl3->data->sgfn], cg->fgfs[varl4->data->sgfn]);
-                else if (tindex == 1)
-                    f_average2p(cg->shape, cg->fgfs[varl1->data->sgfn], cg->fgfs[varl2->data->sgfn],
-                                            cg->fgfs[varl3->data->sgfn], cg->fgfs[varl4->data->sgfn]);
-                else if (tindex == -1)
-                    f_average2m(cg->shape, cg->fgfs[varl1->data->sgfn], cg->fgfs[varl2->data->sgfn],
-                                            cg->fgfs[varl3->data->sgfn], cg->fgfs[varl4->data->sgfn]);
-                else
-                {
-                    cout << "error tindex in long cgh::prepare_inter_time_level" << endl;
-                    MPI_Abort(MPI_COMM_WORLD, 1);
-                }
-                varl1 = varl1->next;
-                varl2 = varl2->next;
-                varl3 = varl3->next;
-                varl4 = varl4->next;
-            }
-        }
+            local_blocks.push_back(cg);
         if (BP == Pat->ble)
             break;
         BP = BP->next;
+    }
+
+    #pragma omp parallel for schedule(static) if (local_blocks.size() > 1)
+    for (int block_index = 0; block_index < static_cast<int>(local_blocks.size()); ++block_index)
+    {
+        Block *cg = local_blocks[block_index];
+        MyList<var> *varl1 = VarList1;
+        MyList<var> *varl2 = VarList2;
+        MyList<var> *varl3 = VarList3;
+        MyList<var> *varl4 = VarList4;
+        while (varl1)
+        {
+            if (tindex == 0)
+                f_average2(cg->shape, cg->fgfs[varl1->data->sgfn], cg->fgfs[varl2->data->sgfn],
+                                     cg->fgfs[varl3->data->sgfn], cg->fgfs[varl4->data->sgfn]);
+            else if (tindex == 1)
+                f_average2p(cg->shape, cg->fgfs[varl1->data->sgfn], cg->fgfs[varl2->data->sgfn],
+                                        cg->fgfs[varl3->data->sgfn], cg->fgfs[varl4->data->sgfn]);
+            else if (tindex == -1)
+                f_average2m(cg->shape, cg->fgfs[varl1->data->sgfn], cg->fgfs[varl2->data->sgfn],
+                                        cg->fgfs[varl3->data->sgfn], cg->fgfs[varl4->data->sgfn]);
+            else
+            {
+                cout << "error tindex in long cgh::prepare_inter_time_level" << endl;
+                MPI_Abort(MPI_COMM_WORLD, 1);
+            }
+            varl1 = varl1->next;
+            varl2 = varl2->next;
+            varl3 = varl3->next;
+            varl4 = varl4->next;
+        }
     }
 }
 void Parallel::Prolong(Patch *Patc, Patch *Patf,

@@ -2102,20 +2102,12 @@ void bssn_class::Step(int lev, int YN)
   //
   // OldStateList  old -----------
   // update
-  Pp = GH->PatL[lev];
-  while (Pp)
+  #pragma omp parallel for schedule(static) if (omp_blocks.size() > 1)
+  for (int block_index = 0; block_index < static_cast<int>(omp_blocks.size()); ++block_index)
   {
-    MyList<Block> *BP = Pp->data->blb;
-    while (BP)
-    {
-      Block *cg = BP->data;
-      cg->swapList(StateList, SynchList_cor, myrank);
-      cg->swapList(OldStateList, SynchList_cor, myrank);
-      if (BP == Pp->data->ble)
-        break;
-      BP = BP->next;
-    }
-    Pp = Pp->next;
+    Block *cg = omp_blocks[block_index].second;
+    cg->swapList(StateList, SynchList_cor, myrank);
+    cg->swapList(OldStateList, SynchList_cor, myrank);
   }
   // for black hole position
   if (BH_num > 0 && lev == GH->levels - 1)
