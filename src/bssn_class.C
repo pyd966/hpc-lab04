@@ -7,6 +7,8 @@
 #include <iostream>
 #include <vector>
 #include <utility>
+#include <cerrno>
+#include <cstdlib>
 using namespace std;
 
 #include <time.h>
@@ -33,6 +35,66 @@ using namespace std;
 #include "perf.h"
 
 #include "derivatives.h"
+
+namespace
+{
+int omp_threads_for_level(int lev, int first_moving_level)
+{
+#ifdef _OPENMP
+  const int maximum = omp_get_max_threads();
+  const char *name =
+      lev < first_moving_level
+          ? "AMSS_OMP_STATIC_THREADS"
+          : "AMSS_OMP_MOVING_THREADS";
+  const char *text = getenv(name);
+  if (text == 0 || *text == 0)
+    return maximum;
+
+  char *end = 0;
+  errno = 0;
+  long target = strtol(text, &end, 10);
+  if (errno || end == text || *end || target < 1 || target > maximum)
+  {
+    cerr << name << " must be an integer in [1, " << maximum
+         << "]: " << text << endl;
+    MPI_Abort(MPI_COMM_WORLD, 1);
+  }
+  return static_cast<int>(target);
+#else
+  (void)lev;
+  (void)first_moving_level;
+  return 1;
+#endif
+}
+
+class OmpThreadScope
+{
+public:
+  explicit OmpThreadScope(int threads)
+  {
+#ifdef _OPENMP
+    previous_ = omp_get_max_threads();
+    if (threads != previous_)
+      omp_set_num_threads(threads);
+#else
+    (void)threads;
+#endif
+  }
+
+  ~OmpThreadScope()
+  {
+#ifdef _OPENMP
+    if (omp_get_max_threads() != previous_)
+      omp_set_num_threads(previous_);
+#endif
+  }
+
+private:
+#ifdef _OPENMP
+  int previous_;
+#endif
+};
+}
 
 //================================================================================================
 
@@ -1776,6 +1838,8 @@ void bssn_class::RecursiveStep(int lev)
 //================================================================================================
 void bssn_class::Step(int lev, int YN)
 {
+  OmpThreadScope omp_thread_scope(
+      omp_threads_for_level(lev, GH->movls));
   setpbh(BH_num, Porg0, Mass, BH_num_input);
 
   double dT_lev = dT * pow(0.5, Mymax(lev, trfls));

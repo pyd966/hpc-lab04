@@ -45,6 +45,10 @@ OMP_THREADS="${ABE_PROFILE_OMP_THREADS:-30}"
 OPENMP_ENABLE="${ABE_PROFILE_OPENMP:-ON}"
 OMP_ONLY="${ABE_PROFILE_OMP_ONLY:-ON}"
 BLOCK_TARGET="${ABE_PROFILE_BLOCK_TARGET:-${AMSS_OMP_BLOCK_TARGET:-}}"
+STATIC_BLOCK_TARGET="${ABE_PROFILE_STATIC_BLOCK_TARGET:-${AMSS_OMP_STATIC_BLOCK_TARGET:-}}"
+MOVING_BLOCK_TARGET="${ABE_PROFILE_MOVING_BLOCK_TARGET:-${AMSS_OMP_MOVING_BLOCK_TARGET:-}}"
+STATIC_THREADS="${ABE_PROFILE_STATIC_THREADS:-${AMSS_OMP_STATIC_THREADS:-}}"
+MOVING_THREADS="${ABE_PROFILE_MOVING_THREADS:-${AMSS_OMP_MOVING_THREADS:-}}"
 if [[ "$OMP_ONLY" == "ON" || "$OMP_ONLY" == "1" ]]; then
     RANKS=1
 fi
@@ -61,6 +65,10 @@ echo "OpenMP enabled: $OPENMP_ENABLE"
 echo "OpenMP threads: $OMP_THREADS"
 echo "OpenMP-only ABE: $OMP_ONLY"
 echo "OpenMP block target: ${BLOCK_TARGET:-thread-count default}"
+echo "OpenMP static block target: ${STATIC_BLOCK_TARGET:-global/default}"
+echo "OpenMP moving block target: ${MOVING_BLOCK_TARGET:-global/default}"
+echo "OpenMP static threads: ${STATIC_THREADS:-global default}"
+echo "OpenMP moving threads: ${MOVING_THREADS:-global default}"
 echo "profile evolution interval: t=0..$EVOLVE_TIME"
 echo "ABE flags: $ABE_OPT $ABE_ARCH"
 echo "TwoPuncture flags: $TWOP_OPT $TWOP_ARCH"
@@ -75,6 +83,26 @@ if [[ -n "$BLOCK_TARGET" ]]; then
     export AMSS_OMP_BLOCK_TARGET="$BLOCK_TARGET"
 else
     unset AMSS_OMP_BLOCK_TARGET
+fi
+if [[ -n "$STATIC_BLOCK_TARGET" ]]; then
+    export AMSS_OMP_STATIC_BLOCK_TARGET="$STATIC_BLOCK_TARGET"
+else
+    unset AMSS_OMP_STATIC_BLOCK_TARGET
+fi
+if [[ -n "$MOVING_BLOCK_TARGET" ]]; then
+    export AMSS_OMP_MOVING_BLOCK_TARGET="$MOVING_BLOCK_TARGET"
+else
+    unset AMSS_OMP_MOVING_BLOCK_TARGET
+fi
+if [[ -n "$STATIC_THREADS" ]]; then
+    export AMSS_OMP_STATIC_THREADS="$STATIC_THREADS"
+else
+    unset AMSS_OMP_STATIC_THREADS
+fi
+if [[ -n "$MOVING_THREADS" ]]; then
+    export AMSS_OMP_MOVING_THREADS="$MOVING_THREADS"
+else
+    unset AMSS_OMP_MOVING_THREADS
 fi
 export OMPI_ALLOW_RUN_AS_ROOT=1
 export OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1

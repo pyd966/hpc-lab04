@@ -24,12 +24,13 @@ exec > >(tee "$OUT_DIR/job.log") 2>&1
 
 OMP_THREADS="${ABE_SWEEP_OMP_THREADS:-30}"
 EVOLVE_TIME="${ABE_SWEEP_TIME:-4.0}"
-TARGETS="${ABE_SWEEP_TARGETS:-18 24 30 36}"
+COMBINATIONS="${ABE_SWEEP_BLOCK_COMBINATIONS:-30:30 24:30 27:30 28:30 30:24 30:28}"
 
 echo "git revision: $(git rev-parse HEAD 2>/dev/null || echo unknown)"
 echo "OpenMP threads: $OMP_THREADS"
 echo "evolution interval: t=0..$EVOLVE_TIME"
-echo "block targets: $TARGETS"
+echo "static:moving block targets: $COMBINATIONS"
+echo "each target also sets that level group's OpenMP team size"
 
 export JOBS="$(nproc)"
 export OMP_NUM_THREADS="$OMP_THREADS"
@@ -56,11 +57,19 @@ unset AMSS_NCKU_PREPARE_ONLY
 
 BASE_DIR="$PREP_ROOT/GW250118/AMSS_NCKU_output"
 : > "$OUT_DIR/timings.tsv"
-printf 'target\tevolve_seconds\ttotal_seconds\taverage_cpus\tcourse_check\n' \
+printf 'static_blocks\tstatic_threads\tmoving_blocks\tmoving_threads\tevolve_seconds\ttotal_seconds\taverage_cpus\tcourse_check\n' \
     >> "$OUT_DIR/timings.tsv"
 
-for target in $TARGETS; do
-    run_dir="$OUT_DIR/target-$target"
+unset AMSS_OMP_BLOCK_TARGET
+for combination in $COMBINATIONS; do
+    static_target="${combination%%:*}"
+    moving_target="${combination#*:}"
+    if [[ "$static_target" == "$combination" || -z "$static_target" || -z "$moving_target" ]]; then
+        echo "invalid block combination (expected STATIC:MOVING): $combination" >&2
+        exit 2
+    fi
+
+    run_dir="$OUT_DIR/static-$static_target-moving-$moving_target"
     mkdir -p "$run_dir/binary_output"
     cp "$BUILD_DIR/ABE" "$run_dir/ABE"
     cp "$BASE_DIR/Ansorg.psid" "$run_dir/Ansorg.psid"
@@ -68,13 +77,18 @@ for target in $TARGETS; do
         "s/^(ABE::TotalTime[[:space:]]*=[[:space:]]*).*/\\1$EVOLVE_TIME/" \
         "$BASE_DIR/input.par" > "$run_dir/input.par"
 
-    export AMSS_OMP_BLOCK_TARGET="$target"
-    echo "=== Block target $target ==="
+    export AMSS_OMP_STATIC_BLOCK_TARGET="$static_target"
+    export AMSS_OMP_MOVING_BLOCK_TARGET="$moving_target"
+    export AMSS_OMP_STATIC_THREADS="$static_target"
+    export AMSS_OMP_MOVING_THREADS="$moving_target"
+    echo "=== Static blocks/threads $static_target, moving blocks/threads $moving_target ==="
     perf stat -o "$run_dir/perf-stat.txt" -- \
         bash -c 'cd "$1" && exec ./ABE < /dev/null' _ "$run_dir" \
         2>&1 | tee "$run_dir/run.log"
 
+    set +e
     ./check.sh "$run_dir/binary_output" | tee "$run_dir/check.txt"
+    set -e
     course_check="$(awk '/^FINAL:/ {result=$2} END {print result}' "$run_dir/check.txt")"
 
     evolve="$(awk '/Total Evolve Time:/ {value=$4} END {print value}' "$run_dir/run.log")"
@@ -82,7 +96,9 @@ for target in $TARGETS; do
     task_ms="$(awk '/task-clock/ {gsub(/,/, "", $1); print $1}' "$run_dir/perf-stat.txt")"
     elapsed="$(awk '/seconds time elapsed/ {gsub(/,/, "", $1); print $1}' "$run_dir/perf-stat.txt")"
     avg="$(awk -v task="$task_ms" -v elapsed="$elapsed" 'BEGIN {printf "%.3f", task / 1000 / elapsed}')"
-    printf '%s\t%s\t%s\t%s\t%s\n' "$target" "$evolve" "$total" "$avg" "$course_check" \
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$static_target" "$static_target" "$moving_target" "$moving_target" \
+        "$evolve" "$total" "$avg" "$course_check" \
         | tee -a "$OUT_DIR/timings.tsv"
 done
 

@@ -134,6 +134,7 @@ MyList<Block> *Parallel::distribute(
     MyList<Patch> *PatchLIST, int cpusize, int ingfsi, int fngfsi,
     bool periodic, int nodes
 ) {
+    const bool nodes_supplied = nodes != 0;
     if (nodes == 0)
         nodes = cpusize;
 
@@ -142,7 +143,7 @@ MyList<Block> *Parallel::distribute(
     // historical thread-count default, but allow performance experiments to
     // request a different decomposition without changing the numerical input.
     const char *target_text = std::getenv("AMSS_OMP_BLOCK_TARGET");
-    if (target_text && *target_text)
+    if (!nodes_supplied && target_text && *target_text)
     {
         char *end = 0;
         errno = 0;
@@ -155,7 +156,7 @@ MyList<Block> *Parallel::distribute(
         }
         nodes = static_cast<int>(target);
     }
-    else
+    else if (!nodes_supplied)
     {
         nodes = Mymax(nodes, omp_get_max_threads());
     }

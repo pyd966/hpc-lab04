@@ -54,9 +54,25 @@ fi
 # evaluation allocation, without hard-coding either topology.
 physical_cores="$($ROOT_DIR/scripts/count_available_physical_cores.sh)"
 export AMSS_MPIEXEC="${AMSS_JOB_MPIEXEC:-mpiexec --allow-run-as-root}"
-export OMP_NUM_THREADS="${OMP_NUM_THREADS:-$physical_cores}"
+omp_threads="${OMP_NUM_THREADS:-$physical_cores}"
+if [[ ! "$omp_threads" =~ ^[1-9][0-9]*$ ]]; then
+    echo "OMP_NUM_THREADS must be one positive integer: $omp_threads" >&2
+    exit 2
+fi
+export OMP_NUM_THREADS="$omp_threads"
 export OMP_PROC_BIND="${OMP_PROC_BIND:-close}"
 export OMP_PLACES="${OMP_PLACES:-cores}"
+
+# Static levels have at most 32 useful Blocks on the course grid. Using 80%
+# of the full team reduces idle participants there, while moving levels keep
+# all available cores. The same ratio gives 24/30 on the current node and
+# 48/60 on the physical-core-only evaluation node.
+static_target=$((omp_threads * 4 / 5))
+static_target=$((static_target > 0 ? static_target : 1))
+export AMSS_OMP_STATIC_BLOCK_TARGET="${AMSS_OMP_STATIC_BLOCK_TARGET:-$static_target}"
+export AMSS_OMP_MOVING_BLOCK_TARGET="${AMSS_OMP_MOVING_BLOCK_TARGET:-$omp_threads}"
+export AMSS_OMP_STATIC_THREADS="${AMSS_OMP_STATIC_THREADS:-$static_target}"
+export AMSS_OMP_MOVING_THREADS="${AMSS_OMP_MOVING_THREADS:-$omp_threads}"
 export AMSS_OMP_ONLY_RUN=1
 export AMSS_OUTPUT_ROOT="$RUN_ROOT"
 export AMSS_CACHE_DIR="$ROOT_DIR/profile/twopuncture-cache"
@@ -69,6 +85,11 @@ else
     export AMSS_BUILD_DIR="$ROOT_DIR/build-cpu-baseline"
     BUILD_OPT='-O3'
 fi
+
+echo "OpenMP policy: total=$OMP_NUM_THREADS, static blocks/threads=" \
+     "$AMSS_OMP_STATIC_BLOCK_TARGET/$AMSS_OMP_STATIC_THREADS, " \
+     "moving blocks/threads=" \
+     "$AMSS_OMP_MOVING_BLOCK_TARGET/$AMSS_OMP_MOVING_THREADS"
 
 echo "=== Build ==="
 ./compile.sh \
