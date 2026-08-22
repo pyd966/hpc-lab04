@@ -49,12 +49,15 @@ if [[ "$MODE" == topology ]]; then
     exit 0
 fi
 
-# lab4 currently exposes 60 logical CPUs, i.e. 30 physical cores with SMT
-# siblings. The fixed baseline input launches 30 ranks, one rank per core.
-export AMSS_MPIEXEC="${AMSS_JOB_MPIEXEC:-mpiexec --allow-run-as-root --map-by core --bind-to core --report-bindings}"
-export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
+# Count unique physical cores inside the job's CPU affinity mask. This gives
+# 30 on the current SMT-enabled lab4 node and 60 on the physical-core-only
+# evaluation allocation, without hard-coding either topology.
+physical_cores="$($ROOT_DIR/scripts/count_available_physical_cores.sh)"
+export AMSS_MPIEXEC="${AMSS_JOB_MPIEXEC:-mpiexec --allow-run-as-root}"
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-$physical_cores}"
 export OMP_PROC_BIND="${OMP_PROC_BIND:-close}"
 export OMP_PLACES="${OMP_PLACES:-cores}"
+export AMSS_OMP_ONLY_RUN=1
 export AMSS_OUTPUT_ROOT="$RUN_ROOT"
 export AMSS_CACHE_DIR="$ROOT_DIR/profile/twopuncture-cache"
 export JOBS="$(nproc)"
@@ -68,7 +71,14 @@ else
 fi
 
 echo "=== Build ==="
-./compile.sh -DAMSS_ENABLE_GPU=OFF -DAMSS_OPT="$BUILD_OPT"
+./compile.sh \
+    -DAMSS_ENABLE_GPU=OFF \
+    -DAMSS_ENABLE_OPENMP=ON \
+    -DAMSS_ENABLE_OMP_ONLY=ON \
+    -DAMSS_ENABLE_TWOPUNCTURE_OPENMP=ON \
+    -DAMSS_OPT="$BUILD_OPT" \
+    -DAMSS_TWOPUNCTURE_OPT=-O3 \
+    -DAMSS_TWOPUNCTURE_ARCH_FLAGS=-march=native
 
 echo "=== Run ==="
 case "$MODE" in

@@ -4,6 +4,9 @@
 #include "prolongrestrict.h"
 #include "misc.h"
 #include "parameters.h"
+#include <cerrno>
+#include <climits>
+#include <cstdlib>
 #include <vector>
 
 
@@ -135,8 +138,27 @@ MyList<Block> *Parallel::distribute(
         nodes = cpusize;
 
 #ifdef AMSS_OMP_ONLY
-    // In the single-process build, use extra blocks as OpenMP work units.
-    nodes = Mymax(nodes, omp_get_max_threads());
+    // In the single-process build, Blocks are OpenMP work units. Keep the
+    // historical thread-count default, but allow performance experiments to
+    // request a different decomposition without changing the numerical input.
+    const char *target_text = std::getenv("AMSS_OMP_BLOCK_TARGET");
+    if (target_text && *target_text)
+    {
+        char *end = 0;
+        errno = 0;
+        long target = std::strtol(target_text, &end, 10);
+        if (errno || end == target_text || *end || target < 1 || target > INT_MAX)
+        {
+            cerr << "AMSS_OMP_BLOCK_TARGET must be an integer in [1, "
+                 << INT_MAX << "]: " << target_text << endl;
+            MPI_Abort(MPI_COMM_WORLD, 1);
+        }
+        nodes = static_cast<int>(target);
+    }
+    else
+    {
+        nodes = Mymax(nodes, omp_get_max_threads());
+    }
 #endif
 
     if (dim != 3)
@@ -284,6 +306,11 @@ MyList<Block> *Parallel::distribute(
         if (myrank == 0)
             cout << "Parallel::distribute CAUSTION: level#" << lev << " uses essencially " << reacpu << " processors vs " << nodes << " nodes run, your scientific computation scale is not as large as you estimate." << endl;
     }
+
+#ifdef AMSS_OMP_ONLY
+    cout << "OpenMP block decomposition: level#" << lev
+         << " target=" << nodes << " actual=" << reacpu << endl;
+#endif
 
     return BlL;
 }

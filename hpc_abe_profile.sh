@@ -44,6 +44,7 @@ RANKS="${ABE_PROFILE_RANKS:-1}"
 OMP_THREADS="${ABE_PROFILE_OMP_THREADS:-30}"
 OPENMP_ENABLE="${ABE_PROFILE_OPENMP:-ON}"
 OMP_ONLY="${ABE_PROFILE_OMP_ONLY:-ON}"
+BLOCK_TARGET="${ABE_PROFILE_BLOCK_TARGET:-${AMSS_OMP_BLOCK_TARGET:-}}"
 if [[ "$OMP_ONLY" == "ON" || "$OMP_ONLY" == "1" ]]; then
     RANKS=1
 fi
@@ -59,6 +60,7 @@ echo "MPI ranks: $RANKS"
 echo "OpenMP enabled: $OPENMP_ENABLE"
 echo "OpenMP threads: $OMP_THREADS"
 echo "OpenMP-only ABE: $OMP_ONLY"
+echo "OpenMP block target: ${BLOCK_TARGET:-thread-count default}"
 echo "profile evolution interval: t=0..$EVOLVE_TIME"
 echo "ABE flags: $ABE_OPT $ABE_ARCH"
 echo "TwoPuncture flags: $TWOP_OPT $TWOP_ARCH"
@@ -69,6 +71,11 @@ export JOBS="$(nproc)"
 export OMP_NUM_THREADS="$OMP_THREADS"
 export OMP_PLACES=cores
 export OMP_PROC_BIND=close
+if [[ -n "$BLOCK_TARGET" ]]; then
+    export AMSS_OMP_BLOCK_TARGET="$BLOCK_TARGET"
+else
+    unset AMSS_OMP_BLOCK_TARGET
+fi
 export OMPI_ALLOW_RUN_AS_ROOT=1
 export OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1
 export AMSS_BUILD_DIR="$BUILD_DIR"
