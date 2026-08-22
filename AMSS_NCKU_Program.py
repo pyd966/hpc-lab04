@@ -31,8 +31,14 @@ import shutil
 import sys
 import time
 
+# Native libraries imported by matplotlib may honor OMP_PROC_BIND and narrow
+# the Python process to one OpenMP place. Preserve the scheduler's full cpuset
+# before those imports so both compute executables inherit the allocation.
+SCHEDULER_AFFINITY = os.sched_getaffinity(0)
+
 import matplotlib
 matplotlib.use("Agg")          # headless: write figures to files, no display
+os.sched_setaffinity(0, SCHEDULER_AFFINITY)
 
 import AMSS_NCKU_Input as input_data
 
@@ -90,6 +96,10 @@ def _safe_rmtree(path):
 
 
 os.chdir(REPO_ROOT)
+
+DRIVER_AFFINITY = SCHEDULER_AFFINITY
+print(f"==> Driver CPU affinity before TwoPuncture: "
+      f"{len(DRIVER_AFFINITY)} CPUs {sorted(DRIVER_AFFINITY)}", flush=True)
 
 ##################################################################
 ## This trimmed lab build supports both CPU (ABE) and GPU (ABEGPU) BSSN
@@ -226,6 +236,13 @@ else:
             shutil.copy2(os.path.join(output_directory, f),
                          os.path.join(cache_dir, f))
         print(f" TwoPuncture output cached ({key})")
+
+current_affinity = os.sched_getaffinity(0)
+print(f"==> Driver CPU affinity after TwoPuncture: "
+      f"{len(current_affinity)} CPUs {sorted(current_affinity)}", flush=True)
+if current_affinity != DRIVER_AFFINITY:
+    print("==> Restoring scheduler CPU affinity before ABE", flush=True)
+    os.sched_setaffinity(0, DRIVER_AFFINITY)
 
 ##################################################################
 ## Update puncture parameters from the TwoPuncture output, then
