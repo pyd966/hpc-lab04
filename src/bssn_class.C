@@ -1845,7 +1845,7 @@ void bssn_class::Step(int lev, int YN)
   MyList<Patch> *Pp = 0;
 
   // Predictor
-  #pragma omp parallel for schedule(static) if (omp_blocks.size() > 1)
+  #pragma omp parallel for schedule(static) if (omp_blocks.size() > 1) reduction(|:ERROR)
   for (int block_index = 0; block_index < static_cast<int>(omp_blocks.size()); ++block_index)
   {
     Patch *patch = omp_blocks[block_index].first;
@@ -1899,8 +1899,8 @@ void bssn_class::Step(int lev, int YN)
                  << cg->bbox[0] << ":" << cg->bbox[3] << ","
                  << cg->bbox[1] << ":" << cg->bbox[4] << ","
                  << cg->bbox[2] << ":" << cg->bbox[5] << ")" << endl;
-            ERROR = 1;
           }
+          ERROR = 1;
         }
 
         // rk4 substep and boundary
@@ -1942,10 +1942,12 @@ void bssn_class::Step(int lev, int YN)
         f_lowerboundset(cg->shape, cg->fgfs[phi->sgfn], chitiny);
   }
   // check error information
+#ifndef AMSS_OMP_ONLY
   {
     int erh = ERROR;
     MPI_Allreduce(&erh, &ERROR, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
   }
+#endif
   if (ERROR)
   {
     Parallel::Dump_Data(GH->PatL[lev], StateList, 0, PhysTime, dT_lev);
@@ -1966,7 +1968,7 @@ void bssn_class::Step(int lev, int YN)
     // for RK4: t0, t0+dt/2, t0+dt/2, t0+dt;
     if (iter_count == 1 || iter_count == 3)
       TRK4 += dT_lev / 2;
-    #pragma omp parallel for schedule(static) if (omp_blocks.size() > 1)
+    #pragma omp parallel for schedule(static) if (omp_blocks.size() > 1) reduction(|:ERROR)
     for (int block_index = 0; block_index < static_cast<int>(omp_blocks.size()); ++block_index)
     {
       Patch *patch = omp_blocks[block_index].first;
@@ -2020,8 +2022,8 @@ void bssn_class::Step(int lev, int YN)
                    << cg->bbox[0] << ":" << cg->bbox[3] << ","
                    << cg->bbox[1] << ":" << cg->bbox[4] << ","
                    << cg->bbox[2] << ":" << cg->bbox[5] << ")" << endl;
-              ERROR = 1;
             }
+            ERROR = 1;
           }
           // rk4 substep and boundary
           {
@@ -2063,10 +2065,12 @@ void bssn_class::Step(int lev, int YN)
     }
 
     // check error information
+#ifndef AMSS_OMP_ONLY
     {
       int erh = ERROR;
       MPI_Allreduce(&erh, &ERROR, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
     }
+#endif
 
     if (ERROR)
     {

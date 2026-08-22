@@ -2533,6 +2533,12 @@ struct OmpLocalTransferOp
     size_t size;
 };
 
+vector<double> &omp_transfer_workspace()
+{
+    static vector<double> workspace;
+    return workspace;
+}
+
 void omp_local_transfer(MyList<Parallel::gridseg> *src, MyList<Parallel::gridseg> *dst,
                         MyList<var> *VarList1, MyList<var> *VarList2,
                         int Symmetry, bool mixed)
@@ -2598,7 +2604,7 @@ void omp_local_transfer(MyList<Parallel::gridseg> *src, MyList<Parallel::gridseg
     // The OpenMP-only control path enters transfers sequentially at
     // synchronization boundaries. Reuse the largest packed workspace seen so
     // far instead of allocating and freeing it for every RK/AMR transfer.
-    static vector<double> data_workspace;
+    vector<double> &data_workspace = omp_transfer_workspace();
     if (data_workspace.size() < total_size)
         data_workspace.resize(total_size);
     double *data = data_workspace.data();
@@ -2673,6 +2679,347 @@ void omp_local_transfer(MyList<Parallel::gridseg> *src, MyList<Parallel::gridseg
         }
     }
     }
+}
+
+struct OmpCachedSyncTransfer
+{
+    vector<var *> variables;
+    vector<OmpLocalTransferOp> ops;
+    size_t total_size;
+    int type;
+
+    OmpCachedSyncTransfer() : total_size(0), type(0) {}
+};
+
+struct OmpSyncGeometry
+{
+    MyList<Parallel::gridseg> *dst;
+    MyList<Parallel::gridseg> *src;
+    MyList<Parallel::gridseg> *transfer_src;
+    MyList<Parallel::gridseg> *transfer_dst;
+    vector<Patch *> patches;
+    vector<Block *> blocks;
+    vector<double> geometry;
+    vector<OmpCachedSyncTransfer *> variable_plans;
+
+    OmpSyncGeometry()
+        : dst(0), src(0), transfer_src(0), transfer_dst(0) {}
+
+    ~OmpSyncGeometry()
+    {
+        for (size_t i = 0; i < variable_plans.size(); ++i)
+            delete variable_plans[i];
+        if (dst)
+            dst->destroyList();
+        if (src)
+            src->destroyList();
+        if (transfer_src)
+            transfer_src->destroyList();
+        if (transfer_dst)
+            transfer_dst->destroyList();
+    }
+};
+
+struct OmpSyncCache
+{
+    map<Patch *, OmpSyncGeometry *> patch_plans;
+    map<MyList<Patch> *, OmpSyncGeometry *> list_plans;
+
+    ~OmpSyncCache()
+    {
+        for (map<Patch *, OmpSyncGeometry *>::iterator it =
+                 patch_plans.begin(); it != patch_plans.end(); ++it)
+            delete it->second;
+        for (map<MyList<Patch> *, OmpSyncGeometry *>::iterator it =
+                 list_plans.begin(); it != list_plans.end(); ++it)
+            delete it->second;
+    }
+};
+
+OmpSyncCache &omp_sync_cache()
+{
+    static OmpSyncCache cache;
+    return cache;
+}
+
+void omp_collect_patch_signature(
+    MyList<Patch> *patch_list, vector<Patch *> &patches,
+    vector<Block *> &blocks, vector<double> &geometry)
+{
+    patches.clear();
+    blocks.clear();
+    geometry.clear();
+    while (patch_list)
+    {
+        Patch *patch = patch_list->data;
+        patches.push_back(patch);
+        for (int direction = 0; direction < dim; ++direction)
+        {
+            geometry.push_back(patch->bbox[direction]);
+            geometry.push_back(patch->bbox[dim + direction]);
+            geometry.push_back(static_cast<double>(patch->shape[direction]));
+            geometry.push_back(static_cast<double>(patch->lli[direction]));
+            geometry.push_back(static_cast<double>(patch->uui[direction]));
+        }
+        MyList<Block> *block = patch->blb;
+        while (block)
+        {
+            blocks.push_back(block->data);
+            for (int direction = 0; direction < dim; ++direction)
+            {
+                geometry.push_back(block->data->bbox[direction]);
+                geometry.push_back(block->data->bbox[dim + direction]);
+                geometry.push_back(
+                    static_cast<double>(block->data->shape[direction]));
+            }
+            if (block == patch->ble)
+                break;
+            block = block->next;
+        }
+        patch_list = patch_list->next;
+    }
+}
+
+bool omp_sync_geometry_matches(
+    const OmpSyncGeometry &geometry, MyList<Patch> *patch_list)
+{
+    size_t patch_index = 0;
+    size_t block_index = 0;
+    size_t value_index = 0;
+    while (patch_list)
+    {
+        Patch *patch = patch_list->data;
+        if (patch_index >= geometry.patches.size() ||
+            geometry.patches[patch_index++] != patch)
+            return false;
+        for (int direction = 0; direction < dim; ++direction)
+        {
+            const double values[5] = {
+                patch->bbox[direction], patch->bbox[dim + direction],
+                static_cast<double>(patch->shape[direction]),
+                static_cast<double>(patch->lli[direction]),
+                static_cast<double>(patch->uui[direction])};
+            for (int value = 0; value < 5; ++value)
+                if (value_index >= geometry.geometry.size() ||
+                    geometry.geometry[value_index++] != values[value])
+                    return false;
+        }
+
+        MyList<Block> *block = patch->blb;
+        while (block)
+        {
+            if (block_index >= geometry.blocks.size() ||
+                geometry.blocks[block_index++] != block->data)
+                return false;
+            for (int direction = 0; direction < dim; ++direction)
+            {
+                const double values[3] = {
+                    block->data->bbox[direction],
+                    block->data->bbox[dim + direction],
+                    static_cast<double>(block->data->shape[direction])};
+                for (int value = 0; value < 3; ++value)
+                    if (value_index >= geometry.geometry.size() ||
+                        geometry.geometry[value_index++] != values[value])
+                        return false;
+            }
+            if (block == patch->ble)
+                break;
+            block = block->next;
+        }
+        patch_list = patch_list->next;
+    }
+    return patch_index == geometry.patches.size() &&
+           block_index == geometry.blocks.size() &&
+           value_index == geometry.geometry.size();
+}
+
+bool omp_sync_variables_match(
+    const OmpCachedSyncTransfer &plan, MyList<var> *variables)
+{
+    size_t index = 0;
+    while (variables)
+    {
+        if (index >= plan.variables.size() ||
+            plan.variables[index] != variables->data)
+            return false;
+        ++index;
+        variables = variables->next;
+    }
+    return index == plan.variables.size();
+}
+
+OmpCachedSyncTransfer *omp_build_cached_sync_transfer(
+    OmpSyncGeometry &geometry, MyList<var> *variables)
+{
+    OmpCachedSyncTransfer *plan = new OmpCachedSyncTransfer;
+    for (MyList<var> *node = variables; node; node = node->next)
+        plan->variables.push_back(node->data);
+
+    MyList<Parallel::gridseg> *src = geometry.transfer_src;
+    MyList<Parallel::gridseg> *dst = geometry.transfer_dst;
+    if (!src || !dst)
+        return plan;
+    plan->type = src->data->Bg->lev == dst->data->Bg->lev ? 1 :
+                 (src->data->Bg->lev > dst->data->Bg->lev ? 2 : 3);
+
+    while (src && dst)
+    {
+        for (size_t variable = 0;
+             variable < plan->variables.size(); ++variable)
+        {
+            OmpLocalTransferOp op;
+            op.src = src->data;
+            op.dst = dst->data;
+            op.src_var = plan->variables[variable];
+            op.dst_var = plan->variables[variable];
+            op.offset = plan->total_size;
+            op.size = static_cast<size_t>(op.dst->shape[0]) *
+                      static_cast<size_t>(op.dst->shape[1]) *
+                      static_cast<size_t>(op.dst->shape[2]);
+            plan->total_size += op.size;
+            plan->ops.push_back(op);
+        }
+        src = src->next;
+        dst = dst->next;
+    }
+    return plan;
+}
+
+OmpCachedSyncTransfer &omp_get_cached_sync_transfer(
+    OmpSyncGeometry &geometry, MyList<var> *variables)
+{
+    for (size_t i = 0; i < geometry.variable_plans.size(); ++i)
+        if (omp_sync_variables_match(
+                *geometry.variable_plans[i], variables))
+            return *geometry.variable_plans[i];
+
+    OmpCachedSyncTransfer *plan =
+        omp_build_cached_sync_transfer(geometry, variables);
+    geometry.variable_plans.push_back(plan);
+    return *plan;
+}
+
+void omp_execute_cached_sync(
+    OmpSyncGeometry &geometry, MyList<var> *variables, int Symmetry)
+{
+    OmpCachedSyncTransfer &plan =
+        omp_get_cached_sync_transfer(geometry, variables);
+    if (plan.total_size == 0)
+        return;
+
+    vector<double> &workspace = omp_transfer_workspace();
+    if (workspace.size() < plan.total_size)
+        workspace.resize(plan.total_size);
+    double *data = workspace.data();
+    int DIM = dim;
+
+#pragma omp parallel if (plan.ops.size() > 1)
+    {
+#pragma omp for schedule(dynamic, 1)
+        for (int op_index = 0;
+             op_index < static_cast<int>(plan.ops.size()); ++op_index)
+        {
+            OmpLocalTransferOp &op = plan.ops[op_index];
+            double *packed = data + op.offset;
+            if (plan.type == 1)
+            {
+                f_copy(
+                    DIM, op.dst->llb, op.dst->uub, op.dst->shape, packed,
+                    op.src->Bg->bbox, op.src->Bg->bbox + dim,
+                    op.src->Bg->shape, op.src->Bg->fgfs[op.src_var->sgfn],
+                    op.dst->llb, op.dst->uub);
+            }
+            else if (plan.type == 2)
+            {
+                f_restrict3(
+                    DIM, op.dst->llb, op.dst->uub, op.dst->shape, packed,
+                    op.src->Bg->bbox, op.src->Bg->bbox + dim,
+                    op.src->Bg->shape, op.src->Bg->fgfs[op.src_var->sgfn],
+                    op.dst->llb, op.dst->uub, op.src_var->SoA, Symmetry);
+            }
+            else
+            {
+                f_prolong3(
+                    DIM, op.src->Bg->bbox, op.src->Bg->bbox + dim,
+                    op.src->Bg->shape, op.src->Bg->fgfs[op.src_var->sgfn],
+                    op.dst->llb, op.dst->uub, op.dst->shape, packed,
+                    op.dst->llb, op.dst->uub, op.src_var->SoA, Symmetry);
+            }
+        }
+
+#pragma omp for schedule(static)
+        for (int variable = 0;
+             variable < static_cast<int>(plan.variables.size()); ++variable)
+        {
+            for (size_t op_index = static_cast<size_t>(variable);
+                 op_index < plan.ops.size();
+                 op_index += plan.variables.size())
+            {
+                OmpLocalTransferOp &op = plan.ops[op_index];
+                f_copy(
+                    DIM, op.dst->Bg->bbox, op.dst->Bg->bbox + dim,
+                    op.dst->Bg->shape, op.dst->Bg->fgfs[op.dst_var->sgfn],
+                    op.dst->llb, op.dst->uub, op.dst->shape,
+                    data + op.offset, op.dst->llb, op.dst->uub);
+            }
+        }
+    }
+}
+
+OmpSyncGeometry *omp_get_patch_sync_geometry(Patch *patch)
+{
+    OmpSyncCache &cache = omp_sync_cache();
+    map<Patch *, OmpSyncGeometry *>::iterator found =
+        cache.patch_plans.find(patch);
+    MyList<Patch> one_patch(patch);
+    if (found != cache.patch_plans.end() &&
+        omp_sync_geometry_matches(*found->second, &one_patch))
+        return found->second;
+    if (found != cache.patch_plans.end())
+    {
+        delete found->second;
+        cache.patch_plans.erase(found);
+    }
+
+    OmpSyncGeometry *geometry = new OmpSyncGeometry;
+    omp_collect_patch_signature(
+        &one_patch, geometry->patches, geometry->blocks,
+        geometry->geometry);
+    geometry->dst = Parallel::build_ghost_gsl(patch);
+    geometry->src = Parallel::build_owned_gsl0(patch, 0);
+    Parallel::build_gstl(
+        geometry->src, geometry->dst,
+        &geometry->transfer_src, &geometry->transfer_dst);
+    cache.patch_plans[patch] = geometry;
+    return geometry;
+}
+
+OmpSyncGeometry *omp_get_list_sync_geometry(MyList<Patch> *patch_list)
+{
+    OmpSyncCache &cache = omp_sync_cache();
+    map<MyList<Patch> *, OmpSyncGeometry *>::iterator found =
+        cache.list_plans.find(patch_list);
+    if (found != cache.list_plans.end() &&
+        omp_sync_geometry_matches(*found->second, patch_list))
+        return found->second;
+    if (found != cache.list_plans.end())
+    {
+        delete found->second;
+        cache.list_plans.erase(found);
+    }
+
+    OmpSyncGeometry *geometry = new OmpSyncGeometry;
+    omp_collect_patch_signature(
+        patch_list, geometry->patches, geometry->blocks,
+        geometry->geometry);
+    geometry->dst = Parallel::build_buffer_gsl(patch_list);
+    geometry->src =
+        Parallel::build_owned_gsl(patch_list, 0, 5, 0);
+    Parallel::build_gstl(
+        geometry->src, geometry->dst,
+        &geometry->transfer_src, &geometry->transfer_dst);
+    cache.list_plans[patch_list] = geometry;
+    return geometry;
 }
 }
 #endif
@@ -2881,6 +3228,12 @@ void Parallel::Sync(Patch *Pat, MyList<var> *VarList, int Symmetry)
     int cpusize;
     MPI_Comm_size(MPI_COMM_WORLD, &cpusize);
 
+#ifdef AMSS_OMP_ONLY
+    OmpSyncGeometry *geometry = omp_get_patch_sync_geometry(Pat);
+    omp_execute_cached_sync(*geometry, VarList, Symmetry);
+    return;
+#endif
+
     MyList<Parallel::gridseg> *dst;
     MyList<Parallel::gridseg> **src, **transfer_src, **transfer_dst;
     src = new MyList<Parallel::gridseg> *[cpusize];
@@ -2922,6 +3275,12 @@ void Parallel::Sync(MyList<Patch> *PatL, MyList<var> *VarList, int Symmetry)
         Sync(Pp->data, VarList, Symmetry);
         Pp = Pp->next;
     }
+
+#ifdef AMSS_OMP_ONLY
+    OmpSyncGeometry *geometry = omp_get_list_sync_geometry(PatL);
+    omp_execute_cached_sync(*geometry, VarList, Symmetry);
+    return;
+#endif
 
     // Patch inter Synch
     int cpusize;

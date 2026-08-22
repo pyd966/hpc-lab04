@@ -1,5 +1,9 @@
 # ABE 并行阶段报告：MPI 到 OpenMP 及共享内存优化
 
+> 本文记录当时只完成 P1/transfer 的阶段状态，其中“未完成事项”已经过时。
+> P0/P1/P2 的最终实现和结果见
+> [abe-openmp-p0-p1-p2-final.md](abe-openmp-p0-p1-p2-final.md)。
+
 ## 1. 本阶段结论
 
 本阶段完成并验证了两件不同性质的工作：
