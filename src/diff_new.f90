@@ -33,6 +33,7 @@
   real*8,dimension(-1:ex(1),-1:ex(2),-1:ex(3))   :: fh
   real*8, dimension(3) :: SoA
   integer :: imin,jmin,kmin,imax,jmax,kmax,i,j,k
+  integer :: ibegin,iend,jbegin,jend,kbegin,kend
   real*8 :: d12dx,d12dy,d12dz,d2dx,d2dy,d2dz
   integer, parameter :: NO_SYMM = 0, EQ_SYMM = 1, OCTANT = 2
   real*8,  parameter :: ZEO=0.d0,ONE=1.d0, F60=6.d1
@@ -72,6 +73,54 @@
   fy = ZEO
   fz = ZEO
 
+#ifdef AMSS_FDERIVS_SIMD
+! The active BAM-comparison path uses one common order in all directions.
+! Split its fourth-order interior from the second-order boundary shell so the
+! contiguous i loop has no control flow and can be vectorized.
+  ibegin = max(1, imin+2)
+  iend   = min(ex(1)-1, imax-2)
+  jbegin = max(1, jmin+2)
+  jend   = min(ex(2)-1, jmax-2)
+  kbegin = max(1, kmin+2)
+  kend   = min(ex(3)-1, kmax-2)
+
+  if (ibegin <= iend .and. jbegin <= jend .and. kbegin <= kend) then
+    do k=kbegin,kend
+    do j=jbegin,jend
+!$omp simd
+    do i=ibegin,iend
+      fx(i,j,k) = d12dx*(fh(i-2,j,k)-EIT*fh(i-1,j,k) &
+                         +EIT*fh(i+1,j,k)-fh(i+2,j,k))
+      fy(i,j,k) = d12dy*(fh(i,j-2,k)-EIT*fh(i,j-1,k) &
+                         +EIT*fh(i,j+1,k)-fh(i,j+2,k))
+      fz(i,j,k) = d12dz*(fh(i,j,k-2)-EIT*fh(i,j,k-1) &
+                         +EIT*fh(i,j,k+1)-fh(i,j,k+2))
+    enddo
+    enddo
+    enddo
+  endif
+
+! Retain the original second-order rule and symmetry-aware ghost bounds on
+! the shell. Arrays were initialized to zero, matching the original result
+! for shell points that do not satisfy the second-order condition.
+  do k=1,ex(3)-1
+  do j=1,ex(2)-1
+  do i=1,ex(1)-1
+    if (.not. (i >= ibegin .and. i <= iend .and. &
+               j >= jbegin .and. j <= jend .and. &
+               k >= kbegin .and. k <= kend)) then
+      if(i+1 <= imax .and. i-1 >= imin .and. &
+         j+1 <= jmax .and. j-1 >= jmin .and. &
+         k+1 <= kmax .and. k-1 >= kmin) then
+        fx(i,j,k) = d2dx*(-fh(i-1,j,k)+fh(i+1,j,k))
+        fy(i,j,k) = d2dy*(-fh(i,j-1,k)+fh(i,j+1,k))
+        fz(i,j,k) = d2dz*(-fh(i,j,k-1)+fh(i,j,k+1))
+      endif
+    endif
+  enddo
+  enddo
+  enddo
+#else
   do k=1,ex(3)-1
   do j=1,ex(2)-1
   do i=1,ex(1)-1
@@ -173,6 +222,7 @@
   enddo
   enddo
   enddo
+#endif
 
   return
 
