@@ -424,6 +424,7 @@
   real*8,dimension(-1:ex(1),-1:ex(2),-1:ex(3))   :: fh
   real*8, dimension(3) :: SoA
   integer :: imin,jmin,kmin,imax,jmax,kmax,i,j,k
+  integer :: ibegin,iend,jbegin,jend,kbegin,kend
   real*8  :: Sdxdx,Sdydy,Sdzdz,Fdxdx,Fdydy,Fdzdz
   real*8  :: Sdxdy,Sdxdz,Sdydz,Fdxdy,Fdxdz,Fdydz
   integer, parameter :: NO_SYMM = 0, EQ_SYMM = 1, OCTANT = 2
@@ -476,6 +477,72 @@
   fxz = ZEO
   fyz = ZEO
 
+#ifdef AMSS_FDDERIVS_SIMD
+! The active (BAM comparison) path uses the fourth-order stencil only when
+! all three coordinates are at least two points away from a boundary.  Keep
+! that regular volume separate from the second-order boundary shell so the
+! innermost loop has no control flow for the compiler to vectorize around.
+  ibegin = max(1, imin+2)
+  iend   = min(ex(1)-1, imax-2)
+  jbegin = max(1, jmin+2)
+  jend   = min(ex(2)-1, jmax-2)
+  kbegin = max(1, kmin+2)
+  kend   = min(ex(3)-1, kmax-2)
+
+  if (ibegin <= iend .and. jbegin <= jend .and. kbegin <= kend) then
+    do k=kbegin,kend
+    do j=jbegin,jend
+!$omp simd
+    do i=ibegin,iend
+      fxx(i,j,k) = Fdxdx*(-fh(i-2,j,k)+F16*fh(i-1,j,k)-F30*fh(i,j,k) &
+                          -fh(i+2,j,k)+F16*fh(i+1,j,k))
+      fyy(i,j,k) = Fdydy*(-fh(i,j-2,k)+F16*fh(i,j-1,k)-F30*fh(i,j,k) &
+                          -fh(i,j+2,k)+F16*fh(i,j+1,k))
+      fzz(i,j,k) = Fdzdz*(-fh(i,j,k-2)+F16*fh(i,j,k-1)-F30*fh(i,j,k) &
+                          -fh(i,j,k+2)+F16*fh(i,j,k+1))
+      fxy(i,j,k) = Fdxdy*(     (fh(i-2,j-2,k)-F8*fh(i-1,j-2,k)+F8*fh(i+1,j-2,k)-fh(i+2,j-2,k))  &
+                          -F8 *(fh(i-2,j-1,k)-F8*fh(i-1,j-1,k)+F8*fh(i+1,j-1,k)-fh(i+2,j-1,k))  &
+                          +F8 *(fh(i-2,j+1,k)-F8*fh(i-1,j+1,k)+F8*fh(i+1,j+1,k)-fh(i+2,j+1,k))  &
+                          -    (fh(i-2,j+2,k)-F8*fh(i-1,j+2,k)+F8*fh(i+1,j+2,k)-fh(i+2,j+2,k)))
+      fxz(i,j,k) = Fdxdz*(     (fh(i-2,j,k-2)-F8*fh(i-1,j,k-2)+F8*fh(i+1,j,k-2)-fh(i+2,j,k-2))  &
+                          -F8 *(fh(i-2,j,k-1)-F8*fh(i-1,j,k-1)+F8*fh(i+1,j,k-1)-fh(i+2,j,k-1))  &
+                          +F8 *(fh(i-2,j,k+1)-F8*fh(i-1,j,k+1)+F8*fh(i+1,j,k+1)-fh(i+2,j,k+1))  &
+                          -    (fh(i-2,j,k+2)-F8*fh(i-1,j,k+2)+F8*fh(i+1,j,k+2)-fh(i+2,j,k+2)))
+      fyz(i,j,k) = Fdydz*(     (fh(i,j-2,k-2)-F8*fh(i,j-1,k-2)+F8*fh(i,j+1,k-2)-fh(i,j+2,k-2))  &
+                          -F8 *(fh(i,j-2,k-1)-F8*fh(i,j-1,k-1)+F8*fh(i,j+1,k-1)-fh(i,j+2,k-1))  &
+                          +F8 *(fh(i,j-2,k+1)-F8*fh(i,j-1,k+1)+F8*fh(i,j+1,k+1)-fh(i,j+2,k+1))  &
+                          -    (fh(i,j-2,k+2)-F8*fh(i,j-1,k+2)+F8*fh(i,j+1,k+2)-fh(i,j+2,k+2)))
+    enddo
+    enddo
+    enddo
+  endif
+
+! The shell is small compared with the interior volume.  Retain the original
+! second-order condition here, including symmetry-aware ghost-cell bounds.
+  do k=1,ex(3)-1
+  do j=1,ex(2)-1
+  do i=1,ex(1)-1
+    if (.not. (i >= ibegin .and. i <= iend .and. &
+               j >= jbegin .and. j <= jend .and. &
+               k >= kbegin .and. k <= kend)) then
+      if(i+1 <= imax .and. i-1 >= imin .and. &
+         j+1 <= jmax .and. j-1 >= jmin .and. &
+         k+1 <= kmax .and. k-1 >= kmin) then
+        fxx(i,j,k) = Sdxdx*(fh(i-1,j,k)-TWO*fh(i,j,k)+fh(i+1,j,k))
+        fyy(i,j,k) = Sdydy*(fh(i,j-1,k)-TWO*fh(i,j,k)+fh(i,j+1,k))
+        fzz(i,j,k) = Sdzdz*(fh(i,j,k-1)-TWO*fh(i,j,k)+fh(i,j,k+1))
+        fxy(i,j,k) = Sdxdy*(fh(i-1,j-1,k)-fh(i+1,j-1,k) &
+                            -fh(i-1,j+1,k)+fh(i+1,j+1,k))
+        fxz(i,j,k) = Sdxdz*(fh(i-1,j,k-1)-fh(i+1,j,k-1) &
+                            -fh(i-1,j,k+1)+fh(i+1,j,k+1))
+        fyz(i,j,k) = Sdydz*(fh(i,j-1,k-1)-fh(i,j+1,k-1) &
+                            -fh(i,j-1,k+1)+fh(i,j+1,k+1))
+      endif
+    endif
+  enddo
+  enddo
+  enddo
+#else
   do k=1,ex(3)-1
   do j=1,ex(2)-1
   do i=1,ex(1)-1
@@ -597,6 +664,7 @@
    enddo
    enddo
    enddo
+#endif
 
   return
 
