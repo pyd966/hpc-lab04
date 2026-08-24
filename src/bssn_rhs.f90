@@ -167,12 +167,21 @@
 
   chi_rhs = F2o3 *chin1*( alpn1 * trK - div_beta ) !rhs for chi
 
+#ifdef AMSS_FDERIVS_BATCH
+  call fderivs2(ex,dxx,gxxx,gxxy,gxxz,gxy,gxyx,gxyy,gxyz,X,Y,Z, &
+                SYM,SYM,SYM,ANTI,ANTI,SYM,Symmetry,Lev)
+  call fderivs2(ex,gxz,gxzx,gxzy,gxzz,dyy,gyyx,gyyy,gyyz,X,Y,Z, &
+                ANTI,SYM,ANTI,SYM,SYM,SYM,Symmetry,Lev)
+  call fderivs2(ex,gyz,gyzx,gyzy,gyzz,dzz,gzzx,gzzy,gzzz,X,Y,Z, &
+                SYM,ANTI,ANTI,SYM,SYM,SYM,Symmetry,Lev)
+#else
   call fderivs(ex,dxx,gxxx,gxxy,gxxz,X,Y,Z,SYM ,SYM ,SYM ,Symmetry,Lev)
   call fderivs(ex,gxy,gxyx,gxyy,gxyz,X,Y,Z,ANTI,ANTI,SYM ,Symmetry,Lev)
   call fderivs(ex,gxz,gxzx,gxzy,gxzz,X,Y,Z,ANTI,SYM ,ANTI,Symmetry,Lev)
   call fderivs(ex,dyy,gyyx,gyyy,gyyz,X,Y,Z,SYM ,SYM ,SYM ,Symmetry,Lev)
   call fderivs(ex,gyz,gyzx,gyzy,gyzz,X,Y,Z,SYM ,ANTI,ANTI,Symmetry,Lev)
   call fderivs(ex,dzz,gzzx,gzzy,gzzz,X,Y,Z,SYM ,SYM ,SYM ,Symmetry,Lev)
+#endif
 
 #ifdef AMSS_ENABLE_RHS_METRIC_FUSION
 ! The six metric RHS expressions are pointwise independent.  Fuse their

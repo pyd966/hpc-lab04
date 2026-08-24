@@ -1133,3 +1133,101 @@
 
   end subroutine fddyz
 
+
+! Pairwise fderivs variant used by the P6 batch experiment.  It keeps the
+! original BAM comparison stencils and boundary rules, but traverses two
+! independent input/output fields in one grid walk.
+  subroutine fderivs2(ex,f1,fx1,fy1,fz1,f2,fx2,fy2,fz2, &
+                      X,Y,Z,SYM11,SYM12,SYM13,SYM21,SYM22,SYM23, &
+                      symmetry,onoff)
+  implicit none
+  integer, intent(in) :: ex(1:3),symmetry,onoff
+  real*8, dimension(ex(1),ex(2),ex(3)), intent(in) :: f1,f2
+  real*8, dimension(ex(1),ex(2),ex(3)), intent(out) :: fx1,fy1,fz1
+  real*8, dimension(ex(1),ex(2),ex(3)), intent(out) :: fx2,fy2,fz2
+  real*8, intent(in) :: X(ex(1)),Y(ex(2)),Z(ex(3))
+  real*8, intent(in) :: SYM11,SYM12,SYM13,SYM21,SYM22,SYM23
+  real*8 :: dX,dY,dZ,d12dx,d12dy,d12dz,d2dx,d2dy,d2dz
+  real*8, dimension(-1:ex(1),-1:ex(2),-1:ex(3)) :: fh1,fh2
+  real*8, dimension(3) :: SoA1,SoA2
+  integer :: imin,jmin,kmin,imax,jmax,kmax,i,j,k
+  integer :: ibegin,iend,jbegin,jend,kbegin,kend
+  real*8, parameter :: ZEO=0.d0,ONE=1.d0,TWO=2.d0,EIT=8.d0,F12=1.2d1
+
+  dX=X(2)-X(1)
+  dY=Y(2)-Y(1)
+  dZ=Z(2)-Z(1)
+  imax=ex(1)
+  jmax=ex(2)
+  kmax=ex(3)
+  imin=1
+  jmin=1
+  kmin=1
+  if (symmetry > 0 .and. dabs(Z(1)) < dZ) kmin=-1
+  if (symmetry > 1 .and. dabs(X(1)) < dX) imin=-1
+  if (symmetry > 1 .and. dabs(Y(1)) < dY) jmin=-1
+  SoA1(1)=SYM11
+  SoA1(2)=SYM12
+  SoA1(3)=SYM13
+  SoA2(1)=SYM21
+  SoA2(2)=SYM22
+  SoA2(3)=SYM23
+  call symmetry_bd(2,ex,f1,fh1,SoA1)
+  call symmetry_bd(2,ex,f2,fh2,SoA2)
+  d12dx=ONE/F12/dX
+  d12dy=ONE/F12/dY
+  d12dz=ONE/F12/dZ
+  d2dx=ONE/TWO/dX
+  d2dy=ONE/TWO/dY
+  d2dz=ONE/TWO/dZ
+  fx1=ZEO
+  fy1=ZEO
+  fz1=ZEO
+  fx2=ZEO
+  fy2=ZEO
+  fz2=ZEO
+
+  ibegin=max(1,imin+2)
+  iend=min(ex(1)-1,imax-2)
+  jbegin=max(1,jmin+2)
+  jend=min(ex(2)-1,jmax-2)
+  kbegin=max(1,kmin+2)
+  kend=min(ex(3)-1,kmax-2)
+  if (ibegin <= iend .and. jbegin <= jend .and. kbegin <= kend) then
+    do k=kbegin,kend
+    do j=jbegin,jend
+!$omp simd
+    do i=ibegin,iend
+      fx1(i,j,k)=d12dx*(fh1(i-2,j,k)-EIT*fh1(i-1,j,k)+EIT*fh1(i+1,j,k)-fh1(i+2,j,k))
+      fy1(i,j,k)=d12dy*(fh1(i,j-2,k)-EIT*fh1(i,j-1,k)+EIT*fh1(i,j+1,k)-fh1(i,j+2,k))
+      fz1(i,j,k)=d12dz*(fh1(i,j,k-2)-EIT*fh1(i,j,k-1)+EIT*fh1(i,j,k+1)-fh1(i,j,k+2))
+      fx2(i,j,k)=d12dx*(fh2(i-2,j,k)-EIT*fh2(i-1,j,k)+EIT*fh2(i+1,j,k)-fh2(i+2,j,k))
+      fy2(i,j,k)=d12dy*(fh2(i,j-2,k)-EIT*fh2(i,j-1,k)+EIT*fh2(i,j+1,k)-fh2(i,j+2,k))
+      fz2(i,j,k)=d12dz*(fh2(i,j,k-2)-EIT*fh2(i,j,k-1)+EIT*fh2(i,j,k+1)-fh2(i,j,k+2))
+    enddo
+    enddo
+    enddo
+  endif
+
+  do k=1,ex(3)-1
+  do j=1,ex(2)-1
+  do i=1,ex(1)-1
+    if (.not. (i >= ibegin .and. i <= iend .and. &
+               j >= jbegin .and. j <= jend .and. &
+               k >= kbegin .and. k <= kend)) then
+      if (i+1 <= imax .and. i-1 >= imin .and. &
+          j+1 <= jmax .and. j-1 >= jmin .and. &
+          k+1 <= kmax .and. k-1 >= kmin) then
+        fx1(i,j,k)=d2dx*(-fh1(i-1,j,k)+fh1(i+1,j,k))
+        fy1(i,j,k)=d2dy*(-fh1(i,j-1,k)+fh1(i,j+1,k))
+        fz1(i,j,k)=d2dz*(-fh1(i,j,k-1)+fh1(i,j,k+1))
+        fx2(i,j,k)=d2dx*(-fh2(i-1,j,k)+fh2(i+1,j,k))
+        fy2(i,j,k)=d2dy*(-fh2(i,j-1,k)+fh2(i,j+1,k))
+        fz2(i,j,k)=d2dz*(-fh2(i,j,k-1)+fh2(i,j,k+1))
+      endif
+    endif
+  enddo
+  enddo
+  enddo
+  return
+  end subroutine fderivs2
