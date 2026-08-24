@@ -103,36 +103,11 @@ __global__ void rhs_kernel(
 
     double val_trK = trK[idx];
 
-    // Extrinsic Curvature Aij
-    double val_Axx = Axx[idx]; double val_Axy = Axy[idx]; double val_Axz = Axz[idx];
-    double val_Ayy = Ayy[idx]; double val_Ayz = Ayz[idx]; double val_Azz = Azz[idx];
-
-    // ==========================================
-    // 2. 计算 Shift Vector (beta) 的导数
-    // ==========================================
-    double betaxx, betaxy, betaxz;
-    double betayx, betayy, betayz;
-    double betazx, betazy, betazz;
-
-    d_fderivs_point(dims, betax, &betaxx, &betaxy, &betaxz, X, Y, Z, ANTI, SYM, SYM, symmetry, lev, i, j, k);
-    d_fderivs_point(dims, betay, &betayx, &betayy, &betayz, X, Y, Z, SYM, ANTI, SYM, symmetry, lev, i, j, k);
-    d_fderivs_point(dims, betaz, &betazx, &betazy, &betazz, X, Y, Z, SYM, SYM, ANTI, symmetry, lev, i, j, k);
-
-    double div_beta = betaxx + betayy + betazz;
-
-    // betaxx_out[idx] = betaxx; betaxy_out[idx] = betaxy; betaxz_out[idx] = betaxz;
-    // betayx_out[idx] = betayx; betayy_out[idx] = betayy; betayz_out[idx] = betayz;
-    // betazx_out[idx] = betazx; betazy_out[idx] = betazy; betazz_out[idx] = betazz;
-
     // ==========================================
     // 3. 计算 Chi 的导数与 RHS
     // ==========================================
     double chix, chiy, chiz;
     d_fderivs_point(dims, chi, &chix, &chiy, &chiz, X, Y, Z, SYM, SYM, SYM, symmetry, lev, i, j, k);
-
-    chi_rhs[idx] = F2o3 * chin1 * (alpn1 * val_trK - div_beta);
-    
-    // chix_out[idx] = chix; chiy_out[idx] = chiy; chiz_out[idx] = chiz;
 
     // ==========================================
     // 4. 计算 Metric (gij) 导数
@@ -157,30 +132,6 @@ __global__ void rhs_kernel(
     // gyyx_out[idx] = gyyx; gyyy_out[idx] = gyyy; gyyz_out[idx] = gyyz;
     // gyzx_out[idx] = gyzx; gyzy_out[idx] = gyzy; gyzz_out[idx] = gyzz;
     // gzzx_out[idx] = gzzx; gzzy_out[idx] = gzzy; gzzz_out[idx] = gzzz;
-
-    // ==========================================
-    // 5. 计算 gij_rhs (部分: 源项 + Lie 导数项)
-    // ==========================================
-    gxx_rhs[idx] = -TWO * alpn1 * val_Axx - F2o3 * val_gxx * div_beta + 
-                    TWO * (val_gxx * betaxx + val_gxy * betayx + val_gxz * betazx);
-
-    gyy_rhs[idx] = -TWO * alpn1 * val_Ayy - F2o3 * val_gyy * div_beta + 
-                    TWO * (val_gxy * betaxy + val_gyy * betayy + val_gyz * betazy);
-
-    gzz_rhs[idx] = -TWO * alpn1 * val_Azz - F2o3 * val_gzz * div_beta + 
-                    TWO * (val_gxz * betaxz + val_gyz * betayz + val_gzz * betazz);
-
-    gxy_rhs[idx] = -TWO * alpn1 * val_Axy + F1o3 * val_gxy * div_beta + 
-                    val_gxx * betaxy + val_gxz * betazy + 
-                    val_gyy * betayx + val_gyz * betazx - val_gxy * betazz;
-    
-    gyz_rhs[idx] = -TWO * alpn1 * val_Ayz + F1o3 * val_gyz * div_beta +
-                    val_gxy * betaxz + val_gyy * betayz +
-                    val_gxz * betaxy + val_gzz * betazy - val_gyz * betaxx;
-
-    gxz_rhs[idx] = -TWO * alpn1 * val_Axz + F1o3 * val_gxz * div_beta + 
-                    val_gxx * betaxz + val_gxy * betayz + 
-                    val_gyz * betayx + val_gzz * betazx - val_gxz * betayy;
 
     // ==========================================
     // 6. 计算逆度规 (Invert Tilted Metric)
@@ -303,101 +254,10 @@ __global__ void rhs_kernel(
     // double gyzz = gyzz_in[idx]; double gzzx = gzzx_in[idx]; double gzzy = gzzy_in[idx];
     // double gzzz = gzzz_in[idx];
 
-    double l_Axx = Axx[idx]; double l_Axy = Axy[idx]; double l_Axz = Axz[idx];
-    double l_Ayy = Ayy[idx]; double l_Ayz = Ayz[idx]; double l_Azz = Azz[idx];
-    
-
-    // ==========================================
-    // Step 1: 初始化 Ricci Tensor (Aij 贡献)
-    // ==========================================
+    // Ricci storage starts directly from the batched metric Hessians below.
+    // Aij and shift-dependent terms are deliberately loaded after Ricci so
+    // they are not live through the connection expansion.
     double l_Rxx, l_Rxy, l_Rxz, l_Ryy, l_Ryz, l_Rzz;
-
-    l_Rxx = gupxx * gupxx * l_Axx + gupxy * gupxy * l_Ayy + gupxz * gupxz * l_Azz + 
-          TWO*(gupxx * gupxy * l_Axy + gupxx * gupxz * l_Axz + gupxy * gupxz * l_Ayz);
-
-    l_Ryy = gupxy * gupxy * l_Axx + gupyy * gupyy * l_Ayy + gupyz * gupyz * l_Azz + 
-          TWO*(gupxy * gupyy * l_Axy + gupxy * gupyz * l_Axz + gupyy * gupyz * l_Ayz);
-
-    l_Rzz = gupxz * gupxz * l_Axx + gupyz * gupyz * l_Ayy + gupzz * gupzz * l_Azz + 
-          TWO*(gupxz * gupyz * l_Axy + gupxz * gupzz * l_Axz + gupyz * gupzz * l_Ayz);
-
-    l_Rxy = gupxx * gupxy * l_Axx + gupxy * gupyy * l_Ayy + gupxz * gupyz * l_Azz + 
-          (gupxx * gupyy + gupxy * gupxy)* l_Axy + 
-          (gupxx * gupyz + gupxz * gupxy)* l_Axz + 
-          (gupxy * gupyz + gupxz * gupyy)* l_Ayz;
-
-    l_Rxz = gupxx * gupxz * l_Axx + gupxy * gupyz * l_Ayy + gupxz * gupzz * l_Azz + 
-          (gupxx * gupyz + gupxy * gupxz)* l_Axy + 
-          (gupxx * gupzz + gupxz * gupxz)* l_Axz + 
-          (gupxy * gupzz + gupxz * gupyz)* l_Ayz;
-
-    l_Ryz = gupxy * gupxz * l_Axx + gupyy * gupyz * l_Ayy + gupyz * gupzz * l_Azz + 
-          (gupxy * gupyz + gupyy * gupxz)* l_Axy + 
-          (gupxy * gupzz + gupyz * gupxz)* l_Axz + 
-          (gupyy * gupzz + gupyz * gupyz)* l_Ayz;
-
-    // ==========================================
-    // Step 2: 计算 Gam^i_rhs (Part 1: No shift)
-    // ==========================================
-    double Lapx, Lapy, Lapz, Kx, Ky, Kz;
-    d_fderivs_point(dims, Lap, &Lapx, &Lapy, &Lapz, X, Y, Z, SYM, SYM, SYM, symmetry, lev, i, j, k);
-    d_fderivs_point(dims, trK, &Kx, &Ky, &Kz, X, Y, Z, SYM, SYM, SYM, symmetry, lev, i, j, k);
-
-    // double chix = chix_in[idx]; double chiy = chiy_in[idx]; double chiz = chiz_in[idx];
-    double val_Sx = Sx[idx]; double val_Sy = Sy[idx]; double val_Sz = Sz[idx];
-
-    // Gamx_rhs
-    double val_Gamx_rhs = - TWO * (Lapx * l_Rxx + Lapy * l_Rxy + Lapz * l_Rxz) + 
-        TWO * alpn1 * (
-        -F3o2/chin1 * (chix * l_Rxx + chiy * l_Rxy + chiz * l_Rxz) - 
-        gupxx * (F2o3 * Kx + EIGHT * PI * val_Sx) - 
-        gupxy * (F2o3 * Ky + EIGHT * PI * val_Sy) - 
-        gupxz * (F2o3 * Kz + EIGHT * PI * val_Sz) + 
-        l_Gamxxx * l_Rxx + l_Gamxyy * l_Ryy + l_Gamxzz * l_Rzz + 
-        TWO * (l_Gamxxy * l_Rxy + l_Gamxxz * l_Rxz + l_Gamxyz * l_Ryz));
-
-    // Gamy_rhs
-    double val_Gamy_rhs = - TWO * (Lapx * l_Rxy + Lapy * l_Ryy + Lapz * l_Ryz) + 
-        TWO * alpn1 * (
-        -F3o2/chin1 * (chix * l_Rxy + chiy * l_Ryy + chiz * l_Ryz) - 
-        gupxy * (F2o3 * Kx + EIGHT * PI * val_Sx) - 
-        gupyy * (F2o3 * Ky + EIGHT * PI * val_Sy) - 
-        gupyz * (F2o3 * Kz + EIGHT * PI * val_Sz) + 
-        l_Gamyxx * l_Rxx + l_Gamyyy * l_Ryy + l_Gamyzz * l_Rzz + 
-        TWO * (l_Gamyxy * l_Rxy + l_Gamyxz * l_Rxz + l_Gamyyz * l_Ryz));
-
-    // Gamz_rhs
-    double val_Gamz_rhs = - TWO * (Lapx * l_Rxz + Lapy * l_Ryz + Lapz * l_Rzz) + 
-        TWO * alpn1 * (
-        -F3o2/chin1 * (chix * l_Rxz + chiy * l_Ryz + chiz * l_Rzz) - 
-        gupxz * (F2o3 * Kx + EIGHT * PI * val_Sx) - 
-        gupyz * (F2o3 * Ky + EIGHT * PI * val_Sy) - 
-        gupzz * (F2o3 * Kz + EIGHT * PI * val_Sz) + 
-        l_Gamzxx * l_Rxx + l_Gamzyy * l_Ryy + l_Gamzzz * l_Rzz + 
-        TWO * (l_Gamzxy * l_Rxy + l_Gamzxz * l_Rxz + l_Gamzyz * l_Ryz));
-
-    
-    // betax 二阶导
-    double bx_gxxx, bx_gxyx, bx_gxzx, bx_gyyx, bx_gyzx, bx_gzzx;
-    d_fdderivs_point(dims, betax, &bx_gxxx, &bx_gxyx, &bx_gxzx, &bx_gyyx, &bx_gyzx, &bx_gzzx,
-                     X, Y, Z, ANTI, SYM, SYM, symmetry, lev, i, j, k);
-
-    // betay 二阶导
-    double by_gxxy, by_gxyy, by_gxzy, by_gyyy, by_gyzy, by_gzzy;
-    d_fdderivs_point(dims, betay, &by_gxxy, &by_gxyy, &by_gxzy, &by_gyyy, &by_gyzy, &by_gzzy,
-                     X, Y, Z, SYM, ANTI, SYM, symmetry, lev, i, j, k);
-
-    // betaz 二阶导
-    double bz_gxxz, bz_gxyz, bz_gxzz, bz_gyyz, bz_gyzz, bz_gzzz;
-    d_fdderivs_point(dims, betaz, &bz_gxxz, &bz_gxyz, &bz_gxzz, &bz_gyyz, &bz_gyzz, &bz_gzzz,
-                     X, Y, Z, SYM, SYM, ANTI, symmetry, lev, i, j, k);
-
-    double fxx, fxy, fxz, fyy, fyz, fzz;
-
-    // fxx/fxy/fxz = Laplacian(beta^i) 的组合 (Fortran line 156)
-    fxx = bx_gxxx + by_gxyy + bz_gxzz;
-    fxy = bx_gxyx + by_gyyy + bz_gyzz;
-    fxz = bx_gxzx + by_gyzy + bz_gzzz;
 
     double Gamxa = gupxx * l_Gamxxx + gupyy * l_Gamxyy + gupzz * l_Gamxzz +
                    TWO * (gupxy * l_Gamxxy + gupxz * l_Gamxxz + gupyz * l_Gamxyz);
@@ -413,33 +273,6 @@ __global__ void rhs_kernel(
     d_fderivs_point(dims, Gamy, &dGamyx, &dGamyy, &dGamyz, X, Y, Z, SYM, ANTI, SYM, symmetry, lev, i, j, k);
     d_fderivs_point(dims, Gamz, &dGamzx, &dGamzy, &dGamzz, X, Y, Z, SYM, SYM, ANTI, symmetry, lev, i, j, k);
 
-    // double betaxx, betaxy, betaxz, betayx, betayy, betayz, betazx, betazy, betazz;
-    // d_fderivs_point(dims, betax, &betaxx, &betaxy, &betaxz, X, Y, Z, ANTI, SYM, SYM, symmetry, lev, i, j, k);
-    // d_fderivs_point(dims, betay, &betayx, &betayy, &betayz, X, Y, Z, SYM, ANTI, SYM, symmetry, lev, i, j, k);
-    // d_fderivs_point(dims, betaz, &betazx, &betazy, &betazz, X, Y, Z, SYM, SYM, ANTI, symmetry, lev, i, j, k);
-    // double div_beta = betaxx + betayy + betazz;
-
-    // Gamx_rhs (Fortran line 170)
-    val_Gamx_rhs += F2o3 * Gamxa * div_beta
-                 - (Gamxa * betaxx + Gamya * betaxy + Gamza * betaxz)
-                 + F1o3 * (gupxx * fxx + gupxy * fxy + gupxz * fxz)
-                 + gupxx * bx_gxxx + gupyy * bx_gyyx + gupzz * bx_gzzx
-                 + TWO * (gupxy * bx_gxyx + gupxz * bx_gxzx + gupyz * bx_gyzx);
-
-    // Gamy_rhs (Fortran line 174)
-    val_Gamy_rhs += F2o3 * Gamya * div_beta
-                 - (Gamxa * betayx + Gamya * betayy + Gamza * betayz)
-                 + F1o3 * (gupxy * fxx + gupyy * fxy + gupyz * fxz)
-                 + gupxx * by_gxxy + gupyy * by_gyyy + gupzz * by_gzzy
-                 + TWO * (gupxy * by_gxyy + gupxz * by_gxzy + gupyz * by_gyzy);
-
-    // Gamz_rhs (Fortran line 178)
-    val_Gamz_rhs += F2o3 * Gamza * div_beta
-                 - (Gamxa * betazx + Gamya * betazy + Gamza * betazz)
-                 + F1o3 * (gupxz * fxx + gupyz * fxy + gupzz * fxz)
-                 + gupxx * bz_gxxz + gupyy * bz_gyyz + gupzz * bz_gzzz
-                 + TWO * (gupxy * bz_gxyz + gupxz * bz_gxzz + gupyz * bz_gyzz);
-    
     // ==========================================
     // Step 3: Ricci (Metric 二阶导数部分)
     // ==========================================
@@ -464,28 +297,10 @@ __global__ void rhs_kernel(
     gyzz = l_gxz * l_Gamxyz + l_gyz * l_Gamyyz + l_gzz * l_Gamzyz;
     gzzz = l_gxz * l_Gamxzz + l_gyz * l_Gamyzz + l_gzz * l_Gamzzz;
     
-    // Rxx
-    d_fdderivs_point(dims, dxx, &fxx, &fxy, &fxz, &fyy, &fyz, &fzz, X, Y, Z, SYM, SYM, SYM, symmetry, lev, i, j, k);
-    l_Rxx = gupxx * fxx + gupyy * fyy + gupzz * fzz + (gupxy * fxy + gupxz * fxz + gupyz * fyz) * TWO;
-    // Ryy
-    d_fdderivs_point(dims, dyy, &fxx, &fxy, &fxz, &fyy, &fyz, &fzz, X, Y, Z, SYM, SYM, SYM, symmetry, lev, i, j, k);
-    l_Ryy = gupxx * fxx + gupyy * fyy + gupzz * fzz + (gupxy * fxy + gupxz * fxz + gupyz * fyz) * TWO;
-
-    // Rzz
-    d_fdderivs_point(dims, dzz, &fxx, &fxy, &fxz, &fyy, &fyz, &fzz, X, Y, Z, SYM, SYM, SYM, symmetry, lev, i, j, k);
-    l_Rzz = gupxx * fxx + gupyy * fyy + gupzz * fzz + (gupxy * fxy + gupxz * fxz + gupyz * fyz) * TWO;
-
-    // Rxy
-    d_fdderivs_point(dims, gxy, &fxx, &fxy, &fxz, &fyy, &fyz, &fzz, X, Y, Z, ANTI, ANTI, SYM, symmetry, lev, i, j, k);
-    l_Rxy = gupxx * fxx + gupyy * fyy + gupzz * fzz + (gupxy * fxy + gupxz * fxz + gupyz * fyz) * TWO;
-
-    // Rxz
-    d_fdderivs_point(dims, gxz, &fxx, &fxy, &fxz, &fyy, &fyz, &fzz, X, Y, Z, ANTI, SYM, ANTI, symmetry, lev, i, j, k);
-    l_Rxz = gupxx * fxx + gupyy * fyy + gupzz * fzz + (gupxy * fxy + gupxz * fxz + gupyz * fyz) * TWO;
-
-    // Ryz
-    d_fdderivs_point(dims, gyz, &fxx, &fxy, &fxz, &fyy, &fyz, &fzz, X, Y, Z, SYM, ANTI, ANTI, symmetry, lev, i, j, k);
-    l_Ryz = gupxx * fxx + gupyy * fyy + gupzz * fzz + (gupxy * fxy + gupxz * fxz + gupyz * fyz) * TWO;
+    // The six metric Hessian contractions are produced by the preceding
+    // variable-batched stencil kernel on this stream.
+    l_Rxx = Rxx[idx]; l_Rxy = Rxy[idx]; l_Rxz = Rxz[idx];
+    l_Ryy = Ryy[idx]; l_Ryz = Ryz[idx]; l_Rzz = Rzz[idx];
 
     // ==========================================
     // Step 4: Ricci (连接系数项) - 完整展开
@@ -570,6 +385,7 @@ __global__ void rhs_kernel(
     // ==========================================
     // Step 6: Chi 二阶导数与 Ricci 修正
     // ==========================================
+    double fxx, fxy, fxz, fyy, fyz, fzz;
     d_fdderivs_point(dims, chi, &fxx, &fxy, &fxz, &fyy, &fyz, &fzz, X, Y, Z, SYM, SYM, SYM, symmetry, lev, i, j, k);
     
     // 协变导数修正
@@ -594,6 +410,120 @@ __global__ void rhs_kernel(
     l_Rxy += (fxy - chix*chiy/chin1/TWO + l_gxy * f_scalar)/chin1/TWO;
     l_Rxz += (fxz - chix*chiz/chin1/TWO + l_gxz * f_scalar)/chin1/TWO;
     l_Ryz += (fyz - chiy*chiz/chin1/TWO + l_gyz * f_scalar)/chin1/TWO;
+
+    // The equation-only values start here, after all Ricci connection terms
+    // have consumed the metric derivatives.  This ordering keeps Aij, beta
+    // derivatives, shift Hessians, and Gamma sources out of the Ricci peak.
+    const double l_Axx = Axx[idx], l_Axy = Axy[idx], l_Axz = Axz[idx];
+    const double l_Ayy = Ayy[idx], l_Ayz = Ayz[idx], l_Azz = Azz[idx];
+
+    double betaxx, betaxy, betaxz;
+    double betayx, betayy, betayz;
+    double betazx, betazy, betazz;
+    d_fderivs_point(dims, betax, &betaxx, &betaxy, &betaxz,
+                    X, Y, Z, ANTI, SYM, SYM, symmetry, lev, i, j, k);
+    d_fderivs_point(dims, betay, &betayx, &betayy, &betayz,
+                    X, Y, Z, SYM, ANTI, SYM, symmetry, lev, i, j, k);
+    d_fderivs_point(dims, betaz, &betazx, &betazy, &betazz,
+                    X, Y, Z, SYM, SYM, ANTI, symmetry, lev, i, j, k);
+    const double div_beta = betaxx + betayy + betazz;
+
+    chi_rhs[idx] = F2o3 * chin1 * (alpn1 * val_trK - div_beta);
+    gxx_rhs[idx] = -TWO * alpn1 * l_Axx - F2o3 * val_gxx * div_beta
+                 + TWO * (val_gxx * betaxx + val_gxy * betayx + val_gxz * betazx);
+    gyy_rhs[idx] = -TWO * alpn1 * l_Ayy - F2o3 * val_gyy * div_beta
+                 + TWO * (val_gxy * betaxy + val_gyy * betayy + val_gyz * betazy);
+    gzz_rhs[idx] = -TWO * alpn1 * l_Azz - F2o3 * val_gzz * div_beta
+                 + TWO * (val_gxz * betaxz + val_gyz * betayz + val_gzz * betazz);
+    gxy_rhs[idx] = -TWO * alpn1 * l_Axy + F1o3 * val_gxy * div_beta
+                 + val_gxx * betaxy + val_gxz * betazy
+                 + val_gyy * betayx + val_gyz * betazx - val_gxy * betazz;
+    gyz_rhs[idx] = -TWO * alpn1 * l_Ayz + F1o3 * val_gyz * div_beta
+                 + val_gxy * betaxz + val_gyy * betayz
+                 + val_gxz * betaxy + val_gzz * betazy - val_gyz * betaxx;
+    gxz_rhs[idx] = -TWO * alpn1 * l_Axz + F1o3 * val_gxz * div_beta
+                 + val_gxx * betaxz + val_gxy * betayz
+                 + val_gyz * betayx + val_gzz * betazx - val_gxz * betayy;
+
+    double Lapx, Lapy, Lapz, Kx, Ky, Kz;
+    d_fderivs_point(dims, Lap, &Lapx, &Lapy, &Lapz,
+                    X, Y, Z, SYM, SYM, SYM, symmetry, lev, i, j, k);
+    d_fderivs_point(dims, trK, &Kx, &Ky, &Kz,
+                    X, Y, Z, SYM, SYM, SYM, symmetry, lev, i, j, k);
+
+    const double Aupxx = gupxx * gupxx * l_Axx + gupxy * gupxy * l_Ayy + gupxz * gupxz * l_Azz
+        + TWO * (gupxx * gupxy * l_Axy + gupxx * gupxz * l_Axz + gupxy * gupxz * l_Ayz);
+    const double Aupyy = gupxy * gupxy * l_Axx + gupyy * gupyy * l_Ayy + gupyz * gupyz * l_Azz
+        + TWO * (gupxy * gupyy * l_Axy + gupxy * gupyz * l_Axz + gupyy * gupyz * l_Ayz);
+    const double Aupzz = gupxz * gupxz * l_Axx + gupyz * gupyz * l_Ayy + gupzz * gupzz * l_Azz
+        + TWO * (gupxz * gupyz * l_Axy + gupxz * gupzz * l_Axz + gupyz * gupzz * l_Ayz);
+    const double Aupxy = gupxx * gupxy * l_Axx + gupxy * gupyy * l_Ayy + gupxz * gupyz * l_Azz
+        + (gupxx * gupyy + gupxy * gupxy) * l_Axy
+        + (gupxx * gupyz + gupxz * gupxy) * l_Axz
+        + (gupxy * gupyz + gupxz * gupyy) * l_Ayz;
+    const double Aupxz = gupxx * gupxz * l_Axx + gupxy * gupyz * l_Ayy + gupxz * gupzz * l_Azz
+        + (gupxx * gupyz + gupxy * gupxz) * l_Axy
+        + (gupxx * gupzz + gupxz * gupxz) * l_Axz
+        + (gupxy * gupzz + gupxz * gupyz) * l_Ayz;
+    const double Aupyz = gupxy * gupxz * l_Axx + gupyy * gupyz * l_Ayy + gupyz * gupzz * l_Azz
+        + (gupxy * gupyz + gupyy * gupxz) * l_Axy
+        + (gupxy * gupzz + gupyz * gupxz) * l_Axz
+        + (gupyy * gupzz + gupyz * gupyz) * l_Ayz;
+
+    const double val_Sx = Sx[idx], val_Sy = Sy[idx], val_Sz = Sz[idx];
+    double val_Gamx_rhs = -TWO * (Lapx * Aupxx + Lapy * Aupxy + Lapz * Aupxz)
+        + TWO * alpn1 * (
+            -F3o2 / chin1 * (chix * Aupxx + chiy * Aupxy + chiz * Aupxz)
+            - gupxx * (F2o3 * Kx + EIGHT * PI * val_Sx)
+            - gupxy * (F2o3 * Ky + EIGHT * PI * val_Sy)
+            - gupxz * (F2o3 * Kz + EIGHT * PI * val_Sz)
+            + l_Gamxxx * Aupxx + l_Gamxyy * Aupyy + l_Gamxzz * Aupzz
+            + TWO * (l_Gamxxy * Aupxy + l_Gamxxz * Aupxz + l_Gamxyz * Aupyz));
+    double val_Gamy_rhs = -TWO * (Lapx * Aupxy + Lapy * Aupyy + Lapz * Aupyz)
+        + TWO * alpn1 * (
+            -F3o2 / chin1 * (chix * Aupxy + chiy * Aupyy + chiz * Aupyz)
+            - gupxy * (F2o3 * Kx + EIGHT * PI * val_Sx)
+            - gupyy * (F2o3 * Ky + EIGHT * PI * val_Sy)
+            - gupyz * (F2o3 * Kz + EIGHT * PI * val_Sz)
+            + l_Gamyxx * Aupxx + l_Gamyyy * Aupyy + l_Gamyzz * Aupzz
+            + TWO * (l_Gamyxy * Aupxy + l_Gamyxz * Aupxz + l_Gamyyz * Aupyz));
+    double val_Gamz_rhs = -TWO * (Lapx * Aupxz + Lapy * Aupyz + Lapz * Aupzz)
+        + TWO * alpn1 * (
+            -F3o2 / chin1 * (chix * Aupxz + chiy * Aupyz + chiz * Aupzz)
+            - gupxz * (F2o3 * Kx + EIGHT * PI * val_Sx)
+            - gupyz * (F2o3 * Ky + EIGHT * PI * val_Sy)
+            - gupzz * (F2o3 * Kz + EIGHT * PI * val_Sz)
+            + l_Gamzxx * Aupxx + l_Gamzyy * Aupyy + l_Gamzzz * Aupzz
+            + TWO * (l_Gamzxy * Aupxy + l_Gamzxz * Aupxz + l_Gamzyz * Aupyz));
+
+    const double bx_gxxx = Gamxxx[idx], bx_gxyx = Gamxxy[idx];
+    const double bx_gxzx = Gamxxz[idx], bx_gyyx = Gamxyy[idx];
+    const double bx_gyzx = Gamxyz[idx], bx_gzzx = Gamxzz[idx];
+    const double by_gxxy = Gamyxx[idx], by_gxyy = Gamyxy[idx];
+    const double by_gxzy = Gamyxz[idx], by_gyyy = Gamyyy[idx];
+    const double by_gyzy = Gamyyz[idx], by_gzzy = Gamyzz[idx];
+    const double bz_gxxz = Gamzxx[idx], bz_gxyz = Gamzxy[idx];
+    const double bz_gxzz = Gamzxz[idx], bz_gyyz = Gamzyy[idx];
+    const double bz_gyzz = Gamzyz[idx], bz_gzzz = Gamzzz[idx];
+    const double shift_trace_x = bx_gxxx + by_gxyy + bz_gxzz;
+    const double shift_trace_y = bx_gxyx + by_gyyy + bz_gyzz;
+    const double shift_trace_z = bx_gxzx + by_gyzy + bz_gzzz;
+
+    val_Gamx_rhs += F2o3 * Gamxa * div_beta
+        - (Gamxa * betaxx + Gamya * betaxy + Gamza * betaxz)
+        + F1o3 * (gupxx * shift_trace_x + gupxy * shift_trace_y + gupxz * shift_trace_z)
+        + gupxx * bx_gxxx + gupyy * bx_gyyx + gupzz * bx_gzzx
+        + TWO * (gupxy * bx_gxyx + gupxz * bx_gxzx + gupyz * bx_gyzx);
+    val_Gamy_rhs += F2o3 * Gamya * div_beta
+        - (Gamxa * betayx + Gamya * betayy + Gamza * betayz)
+        + F1o3 * (gupxy * shift_trace_x + gupyy * shift_trace_y + gupyz * shift_trace_z)
+        + gupxx * by_gxxy + gupyy * by_gyyy + gupzz * by_gzzy
+        + TWO * (gupxy * by_gxyy + gupxz * by_gxzy + gupyz * by_gyzy);
+    val_Gamz_rhs += F2o3 * Gamza * div_beta
+        - (Gamxa * betazx + Gamya * betazy + Gamza * betazz)
+        + F1o3 * (gupxz * shift_trace_x + gupyz * shift_trace_y + gupzz * shift_trace_z)
+        + gupxx * bz_gxxz + gupyy * bz_gyyz + gupzz * bz_gzzz
+        + TWO * (gupxy * bz_gxyz + gupxz * bz_gxzz + gupyz * bz_gyzz);
 
     // ==========================================
     // Step 7: Lapse 二阶导数 & trK_rhs
@@ -689,309 +619,399 @@ __global__ void rhs_kernel(
     dtSfy_rhs[idx] = val_Gamy_rhs - eta * dtSfy[idx];
     dtSfz_rhs[idx] = val_Gamz_rhs - eta * dtSfz[idx];
 
-    // 写回 Gam_rhs
     Gamx_rhs[idx] = val_Gamx_rhs;
     Gamy_rhs[idx] = val_Gamy_rhs;
     Gamz_rhs[idx] = val_Gamz_rhs;
 
-    // l_Gamxxx = l_Gamxxx; l_Gamxxy = l_Gamxxy; l_Gamxxz = l_Gamxxz;
-    // l_Gamxyy = l_Gamxyy; l_Gamxyz = l_Gamxyz; l_Gamxzz = l_Gamxzz;
+    // Only the predictor computes constraints. Materialize its geometry for the
+    // following constraint kernels; corrector stages avoid these 24 stores.
+    if (co == 0) {
+        Gamxxx[idx] = l_Gamxxx; Gamxxy[idx] = l_Gamxxy; Gamxxz[idx] = l_Gamxxz;
+        Gamxyy[idx] = l_Gamxyy; Gamxyz[idx] = l_Gamxyz; Gamxzz[idx] = l_Gamxzz;
+        Gamyxx[idx] = l_Gamyxx; Gamyxy[idx] = l_Gamyxy; Gamyxz[idx] = l_Gamyxz;
+        Gamyyy[idx] = l_Gamyyy; Gamyyz[idx] = l_Gamyyz; Gamyzz[idx] = l_Gamyzz;
+        Gamzxx[idx] = l_Gamzxx; Gamzxy[idx] = l_Gamzxy; Gamzxz[idx] = l_Gamzxz;
+        Gamzyy[idx] = l_Gamzyy; Gamzyz[idx] = l_Gamzyz; Gamzzz[idx] = l_Gamzzz;
+        Rxx[idx] = l_Rxx; Rxy[idx] = l_Rxy; Rxz[idx] = l_Rxz;
+        Ryy[idx] = l_Ryy; Ryz[idx] = l_Ryz; Rzz[idx] = l_Rzz;
+    }
 
-    // l_Gamyxx = l_Gamyxx; l_Gamyxy = l_Gamyxy; l_Gamyxz = l_Gamyxz;
-    // l_Gamyyy = l_Gamyyy; l_Gamyyz = l_Gamyyz; l_Gamyzz = l_Gamyzz;
+    return;
 
-    // l_Gamzxx = l_Gamzxx; l_Gamzxy = l_Gamzxy; l_Gamzxz = l_Gamzxz;
-    // l_Gamzyy = l_Gamzyy; l_Gamzyz = l_Gamzyz; l_Gamzzz = l_Gamzzz;
+}
 
-    // Rxx[idx] = l_Rxx; Ryy[idx] = l_Ryy; Rzz[idx] = l_Rzz;
-    // Rxy[idx] = l_Rxy; Rxz[idx] = l_Rxz; Ryz[idx] = l_Ryz;
+struct RhsAdvectionBatch {
+    const double* field[24];
+    double* rhs[24];
+    signed char parity[24][3];
+};
 
-    // ------------------------------------------------------------------------------------
-    // bssn_advection_dissipation_kernel
-    // ------------------------------------------------------------------------------------
+struct InverseMetric {
+    double xx, xy, xz, yy, yz, zz;
+};
 
-    // 准备平流所需的速度场 (Shift)
-    // lopsided 需要传入 shift 的指针来判断上风方向
-    // device 函数内部会根据 i,j,k 读取 betax[idx] 等
+__device__ __forceinline__ InverseMetric inverse_metric(
+    double gxx, double gxy, double gxz,
+    double gyy, double gyz, double gzz
+) {
+    const double det =
+        gxx * gyy * gzz + TWO * gxy * gyz * gxz
+        - gxz * gyy * gxz - gxy * gxy * gzz - gxx * gyz * gyz;
+    InverseMetric inv;
+    inv.xx = (gyy * gzz - gyz * gyz) / det;
+    inv.xy = -(gxy * gzz - gyz * gxz) / det;
+    inv.xz = (gxy * gyz - gyy * gxz) / det;
+    inv.yy = (gxx * gzz - gxz * gxz) / det;
+    inv.yz = -(gxx * gyz - gxy * gxz) / det;
+    inv.zz = (gxx * gyy - gxy * gxy) / det;
+    return inv;
+}
 
-    // 定义对称性常量 (对应 Fortran 的 array 定义)
-    // SSS: (1, 1, 1)
-    // AAS: (-1, -1, 1)
-    // ASA: (-1, 1, -1)
-    // SAA: (1, -1, -1)
-    // ASS: (-1, 1, 1)
-    // SAS: (1, -1, 1)
-    // SSA: (1, 1, -1)
+struct MetricHessianBatch {
+    const double* field[6];
+    double* contraction[6];
+    signed char parity[6][3];
+};
 
-    // =========================================================
-    // Block 1: Metric Variables (gxx, gxy, gxz, gyy, gyz, gzz)
-    // =========================================================
-    
-    // gxx (SSS)
-    // Fortran: call lopsided(..., gxx, gxx_rhs, ..., SSS)
-    // Note: Passing dxx for derivative calculation is equivalent to gxx
-    gxx_rhs[idx] += d_lopsided_point(dims, dxx, gxx_rhs, betax, betay, betaz, X, Y, Z, symmetry, SYM, SYM, SYM, i, j, k);
-    if (eps > 0.0) gxx_rhs[idx] += d_kodis_point(dims, dxx, X, Y, Z, SYM, SYM, SYM, symmetry, eps, i, j, k);
+struct ShiftHessianBatch {
+    const double* field[3];
+    double* derivative[3][6];
+    signed char parity[3][3];
+};
 
-    // gxy (AAS)
-    gxy_rhs[idx] += d_lopsided_point(dims, gxy, gxy_rhs, betax, betay, betaz, X, Y, Z, symmetry, ANTI, ANTI, SYM, i, j, k);
-    if (eps > 0.0) gxy_rhs[idx] += d_kodis_point(dims, gxy, X, Y, Z, ANTI, ANTI, SYM, symmetry, eps, i, j, k);
+__global__ void rhs_shift_hessian_batch_kernel(
+    int ex0, int ex1, int ex2,
+    const double* X, const double* Y, const double* Z,
+    ShiftHessianBatch batch, int symmetry, int lev
+) {
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const int points = ex0 * ex1 * ex2;
+    if (idx >= points) return;
 
-    // gxz (ASA)
-    gxz_rhs[idx] += d_lopsided_point(dims, gxz, gxz_rhs, betax, betay, betaz, X, Y, Z, symmetry, ANTI, SYM, ANTI, i, j, k);
-    if (eps > 0.0) gxz_rhs[idx] += d_kodis_point(dims, gxz, X, Y, Z, ANTI, SYM, ANTI, symmetry, eps, i, j, k);
+    const int i = idx % ex0;
+    const int plane_idx = idx / ex0;
+    const int j = plane_idx % ex1;
+    const int k = plane_idx / ex1;
+    const int dims[3] = {ex0, ex1, ex2};
+    const int variable = blockIdx.y;
 
-    // gyy (SSS)
-    gyy_rhs[idx] += d_lopsided_point(dims, dyy, gyy_rhs, betax, betay, betaz, X, Y, Z, symmetry, SYM, SYM, SYM, i, j, k);
-    if (eps > 0.0) gyy_rhs[idx] += d_kodis_point(dims, dyy, X, Y, Z, SYM, SYM, SYM, symmetry, eps, i, j, k);
+    double fxx, fxy, fxz, fyy, fyz, fzz;
+    const double sx = static_cast<double>(batch.parity[variable][0]);
+    const double sy = static_cast<double>(batch.parity[variable][1]);
+    const double sz = static_cast<double>(batch.parity[variable][2]);
+    d_fdderivs_point(
+        dims, batch.field[variable],
+        &fxx, &fxy, &fxz, &fyy, &fyz, &fzz,
+        X, Y, Z, sx, sy, sz, symmetry, lev, i, j, k
+    );
+    batch.derivative[variable][0][idx] = fxx;
+    batch.derivative[variable][1][idx] = fxy;
+    batch.derivative[variable][2][idx] = fxz;
+    batch.derivative[variable][3][idx] = fyy;
+    batch.derivative[variable][4][idx] = fyz;
+    batch.derivative[variable][5][idx] = fzz;
+}
 
-    // gyz (SAA)
-    gyz_rhs[idx] += d_lopsided_point(dims, gyz, gyz_rhs, betax, betay, betaz, X, Y, Z, symmetry, SYM, ANTI, ANTI, i, j, k);
-    if (eps > 0.0) gyz_rhs[idx] += d_kodis_point(dims, gyz, X, Y, Z, SYM, ANTI, ANTI, symmetry, eps, i, j, k);
+__global__ void rhs_metric_hessian_batch_kernel(
+    int ex0, int ex1, int ex2,
+    const double* X, const double* Y, const double* Z,
+    const double* dxx, const double* gxy, const double* gxz,
+    const double* dyy, const double* gyz, const double* dzz,
+    MetricHessianBatch batch, int symmetry, int lev
+) {
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const int points = ex0 * ex1 * ex2;
+    if (idx >= points) return;
 
-    // gzz (SSS)
-    gzz_rhs[idx] += d_lopsided_point(dims, dzz, gzz_rhs, betax, betay, betaz, X, Y, Z, symmetry, SYM, SYM, SYM, i, j, k);
-    if (eps > 0.0) gzz_rhs[idx] += d_kodis_point(dims, dzz, X, Y, Z, SYM, SYM, SYM, symmetry, eps, i, j, k);
+    const int i = idx % ex0;
+    const int plane_idx = idx / ex0;
+    const int j = plane_idx % ex1;
+    const int k = plane_idx / ex1;
+    const int dims[3] = {ex0, ex1, ex2};
+    const InverseMetric inv = inverse_metric(
+        dxx[idx] + ONE, gxy[idx], gxz[idx],
+        dyy[idx] + ONE, gyz[idx], dzz[idx] + ONE
+    );
 
-    // =========================================================
-    // Block 2: Extrinsic Curvature (Axx ... Azz)
-    // =========================================================
+#pragma unroll 1
+    for (int offset = 0; offset < 2; ++offset) {
+        const int variable = blockIdx.y * 2 + offset;
+        double fxx, fxy, fxz, fyy, fyz, fzz;
+        const double sx = static_cast<double>(batch.parity[variable][0]);
+        const double sy = static_cast<double>(batch.parity[variable][1]);
+        const double sz = static_cast<double>(batch.parity[variable][2]);
+        d_fdderivs_point(
+            dims, batch.field[variable],
+            &fxx, &fxy, &fxz, &fyy, &fyz, &fzz,
+            X, Y, Z, sx, sy, sz, symmetry, lev, i, j, k
+        );
+        batch.contraction[variable][idx] =
+            inv.xx * fxx + inv.yy * fyy + inv.zz * fzz
+            + TWO * (inv.xy * fxy + inv.xz * fxz + inv.yz * fyz);
+    }
+}
 
-    // Axx (SSS)
-    Axx_rhs[idx] += d_lopsided_point(dims, Axx, Axx_rhs, betax, betay, betaz, X, Y, Z, symmetry, SYM, SYM, SYM, i, j, k);
-    if (eps > 0.0) Axx_rhs[idx] += d_kodis_point(dims, Axx, X, Y, Z, SYM, SYM, SYM, symmetry, eps, i, j, k);
+__global__ void rhs_advection_ko_batch_kernel(
+    int ex0, int ex1, int ex2,
+    const double* X, const double* Y, const double* Z,
+    const double* betax, const double* betay, const double* betaz,
+    RhsAdvectionBatch batch, int symmetry, double eps
+) {
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const int points = ex0 * ex1 * ex2;
+    if (idx >= points) return;
 
-    // Axy (AAS)
-    Axy_rhs[idx] += d_lopsided_point(dims, Axy, Axy_rhs, betax, betay, betaz, X, Y, Z, symmetry, ANTI, ANTI, SYM, i, j, k);
-    if (eps > 0.0) Axy_rhs[idx] += d_kodis_point(dims, Axy, X, Y, Z, ANTI, ANTI, SYM, symmetry, eps, i, j, k);
+    const int i = idx % ex0;
+    const int plane_idx = idx / ex0;
+    const int j = plane_idx % ex1;
+    const int k = plane_idx / ex1;
+    const int dims[3] = {ex0, ex1, ex2};
 
-    // Axz (ASA)
-    Axz_rhs[idx] += d_lopsided_point(dims, Axz, Axz_rhs, betax, betay, betaz, X, Y, Z, symmetry, ANTI, SYM, ANTI, i, j, k);
-    if (eps > 0.0) Axz_rhs[idx] += d_kodis_point(dims, Axz, X, Y, Z, ANTI, SYM, ANTI, symmetry, eps, i, j, k);
+    // Four fields per thread amortizes point/velocity setup while leaving six
+    // independent variable groups in the grid for the 14-SM MIG partition.
+#pragma unroll 1
+    for (int offset = 0; offset < 4; ++offset) {
+        const int variable = blockIdx.y * 4 + offset;
+        const double* field = batch.field[variable];
+        double* rhs = batch.rhs[variable];
+        const double sx = static_cast<double>(batch.parity[variable][0]);
+        const double sy = static_cast<double>(batch.parity[variable][1]);
+        const double sz = static_cast<double>(batch.parity[variable][2]);
 
-    // Ayy (SSS)
-    Ayy_rhs[idx] += d_lopsided_point(dims, Ayy, Ayy_rhs, betax, betay, betaz, X, Y, Z, symmetry, SYM, SYM, SYM, i, j, k);
-    if (eps > 0.0) Ayy_rhs[idx] += d_kodis_point(dims, Ayy, X, Y, Z, SYM, SYM, SYM, symmetry, eps, i, j, k);
+        double value = rhs[idx];
+        value += d_lopsided_point(
+            dims, field, rhs, betax, betay, betaz, X, Y, Z,
+            symmetry, sx, sy, sz, i, j, k
+        );
+        if (eps > 0.0) {
+            value += d_kodis_point(
+                dims, field, X, Y, Z, sx, sy, sz,
+                symmetry, eps, i, j, k
+            );
+        }
+        rhs[idx] = value;
+    }
+}
 
-    // Ayz (SAA)
-    Ayz_rhs[idx] += d_lopsided_point(dims, Ayz, Ayz_rhs, betax, betay, betaz, X, Y, Z, symmetry, SYM, ANTI, ANTI, i, j, k);
-    if (eps > 0.0) Ayz_rhs[idx] += d_kodis_point(dims, Ayz, X, Y, Z, SYM, ANTI, ANTI, symmetry, eps, i, j, k);
+__global__ void rhs_hamiltonian_constraint_kernel(
+    int ex0, int ex1, int ex2,
+    const double* chi, const double* trK,
+    const double* dxx, const double* gxy, const double* gxz,
+    const double* dyy, const double* gyz, const double* dzz,
+    const double* Axx, const double* Axy, const double* Axz,
+    const double* Ayy, const double* Ayz, const double* Azz,
+    const double* Rxx, const double* Rxy, const double* Rxz,
+    const double* Ryy, const double* Ryz, const double* Rzz,
+    const double* rho, double* ham_Res
+) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    const int j = blockIdx.y * blockDim.y + threadIdx.y;
+    const int k = blockIdx.z * blockDim.z + threadIdx.z;
+    if (i >= ex0 || j >= ex1 || k >= ex2) return;
+    const int idx = IDX3D(i, j, k, ex0, ex1, ex2);
 
-    // Azz (SSS)
-    Azz_rhs[idx] += d_lopsided_point(dims, Azz, Azz_rhs, betax, betay, betaz, X, Y, Z, symmetry, SYM, SYM, SYM, i, j, k);
-    if (eps > 0.0) Azz_rhs[idx] += d_kodis_point(dims, Azz, X, Y, Z, SYM, SYM, SYM, symmetry, eps, i, j, k);
+    const InverseMetric inv = inverse_metric(
+        dxx[idx] + ONE, gxy[idx], gxz[idx],
+        dyy[idx] + ONE, gyz[idx], dzz[idx] + ONE
+    );
+    const double axx = Axx[idx];
+    const double axy = Axy[idx];
+    const double axz = Axz[idx];
+    const double ayy = Ayy[idx];
+    const double ayz = Ayz[idx];
+    const double azz = Azz[idx];
 
-    // =========================================================
-    // Block 3: Scalar Variables (chi, trK)
-    // =========================================================
+    const double term_xx =
+        inv.xx * axx * axx + inv.yy * axy * axy + inv.zz * axz * axz
+        + TWO * (inv.xy * axx * axy + inv.xz * axx * axz + inv.yz * axy * axz);
+    const double term_yy =
+        inv.xx * axy * axy + inv.yy * ayy * ayy + inv.zz * ayz * ayz
+        + TWO * (inv.xy * axy * ayy + inv.xz * axy * ayz + inv.yz * ayy * ayz);
+    const double term_zz =
+        inv.xx * axz * axz + inv.yy * ayz * ayz + inv.zz * azz * azz
+        + TWO * (inv.xy * axz * ayz + inv.xz * axz * azz + inv.yz * ayz * azz);
+    const double term_xy =
+        inv.xx * axx * axy + inv.yy * axy * ayy + inv.zz * axz * ayz
+        + inv.xy * (axx * ayy + axy * axy)
+        + inv.xz * (axx * ayz + axz * axy)
+        + inv.yz * (axy * ayz + axz * ayy);
+    const double term_xz =
+        inv.xx * axx * axz + inv.yy * axy * ayz + inv.zz * axz * azz
+        + inv.xy * (axx * ayz + axy * axz)
+        + inv.xz * (axx * azz + axz * axz)
+        + inv.yz * (axy * azz + axz * ayz);
+    const double term_yz =
+        inv.xx * axy * axz + inv.yy * ayy * ayz + inv.zz * ayz * azz
+        + inv.xy * (axy * ayz + ayy * axz)
+        + inv.xz * (axy * azz + ayz * axz)
+        + inv.yz * (ayy * azz + ayz * ayz);
+    const double trA2 =
+        inv.xx * term_xx + inv.yy * term_yy + inv.zz * term_zz
+        + TWO * (inv.xy * term_xy + inv.xz * term_xz + inv.yz * term_yz);
+    const double trR =
+        inv.xx * Rxx[idx] + inv.yy * Ryy[idx] + inv.zz * Rzz[idx]
+        + TWO * (inv.xy * Rxy[idx] + inv.xz * Rxz[idx] + inv.yz * Ryz[idx]);
+    const double K = trK[idx];
+    ham_Res[idx] = (chi[idx] + ONE) * trR + F2o3 * K * K - trA2 - F16 * PI * rho[idx];
+}
 
-    // chi (SSS)
-    chi_rhs[idx] += d_lopsided_point(dims, chi, chi_rhs, betax, betay, betaz, X, Y, Z, symmetry, SYM, SYM, SYM, i, j, k);
-    if (eps > 0.0) chi_rhs[idx] += d_kodis_point(dims, chi, X, Y, Z, SYM, SYM, SYM, symmetry, eps, i, j, k);
+struct SymmetricTensor {
+    double xx, xy, xz, yy, yz, zz;
+};
 
-    // trK (SSS)
-    trK_rhs[idx] += d_lopsided_point(dims, trK, trK_rhs, betax, betay, betaz, X, Y, Z, symmetry, SYM, SYM, SYM, i, j, k);
-    if (eps > 0.0) trK_rhs[idx] += d_kodis_point(dims, trK, X, Y, Z, SYM, SYM, SYM, symmetry, eps, i, j, k);
+struct Christoffel {
+    double xxx, xxy, xxz, xyy, xyz, xzz;
+    double yxx, yxy, yxz, yyy, yyz, yzz;
+    double zxx, zxy, zxz, zyy, zyz, zzz;
+};
 
-    // =========================================================
-    // Block 4: Gauge Variables - Conformal Connection (Gam)
-    // =========================================================
+template<int I, int J>
+__device__ __forceinline__ double tensor_component(const SymmetricTensor& a) {
+    if ((I == 0) && (J == 0)) return a.xx;
+    if (((I == 0) && (J == 1)) || ((I == 1) && (J == 0))) return a.xy;
+    if (((I == 0) && (J == 2)) || ((I == 2) && (J == 0))) return a.xz;
+    if ((I == 1) && (J == 1)) return a.yy;
+    if (((I == 1) && (J == 2)) || ((I == 2) && (J == 1))) return a.yz;
+    return a.zz;
+}
 
-    // Gamx (ASS)
-    Gamx_rhs[idx] += d_lopsided_point(dims, Gamx, Gamx_rhs, betax, betay, betaz, X, Y, Z, symmetry, ANTI, SYM, SYM, i, j, k);
-    if (eps > 0.0) Gamx_rhs[idx] += d_kodis_point(dims, Gamx, X, Y, Z, ANTI, SYM, SYM, symmetry, eps, i, j, k);
+template<int U, int I, int J>
+__device__ __forceinline__ double christoffel_component(const Christoffel& g) {
+    if (U == 0) {
+        if ((I == 0) && (J == 0)) return g.xxx;
+        if (((I == 0) && (J == 1)) || ((I == 1) && (J == 0))) return g.xxy;
+        if (((I == 0) && (J == 2)) || ((I == 2) && (J == 0))) return g.xxz;
+        if ((I == 1) && (J == 1)) return g.xyy;
+        if (((I == 1) && (J == 2)) || ((I == 2) && (J == 1))) return g.xyz;
+        return g.xzz;
+    }
+    if (U == 1) {
+        if ((I == 0) && (J == 0)) return g.yxx;
+        if (((I == 0) && (J == 1)) || ((I == 1) && (J == 0))) return g.yxy;
+        if (((I == 0) && (J == 2)) || ((I == 2) && (J == 0))) return g.yxz;
+        if ((I == 1) && (J == 1)) return g.yyy;
+        if (((I == 1) && (J == 2)) || ((I == 2) && (J == 1))) return g.yyz;
+        return g.yzz;
+    }
+    if ((I == 0) && (J == 0)) return g.zxx;
+    if (((I == 0) && (J == 1)) || ((I == 1) && (J == 0))) return g.zxy;
+    if (((I == 0) && (J == 2)) || ((I == 2) && (J == 0))) return g.zxz;
+    if ((I == 1) && (J == 1)) return g.zyy;
+    if (((I == 1) && (J == 2)) || ((I == 2) && (J == 1))) return g.zyz;
+    return g.zzz;
+}
 
-    // Gamy (SAS)
-    Gamy_rhs[idx] += d_lopsided_point(dims, Gamy, Gamy_rhs, betax, betay, betaz, X, Y, Z, symmetry, SYM, ANTI, SYM, i, j, k);
-    if (eps > 0.0) Gamy_rhs[idx] += d_kodis_point(dims, Gamy, X, Y, Z, SYM, ANTI, SYM, symmetry, eps, i, j, k);
+template<int DIR, int P, int Q>
+__device__ __forceinline__ double covariant_A_derivative(
+    double partial, const SymmetricTensor& a, const Christoffel& g,
+    double chi_derivative, double chin1
+) {
+    return partial
+        - christoffel_component<0, P, DIR>(g) * tensor_component<0, Q>(a)
+        - christoffel_component<1, P, DIR>(g) * tensor_component<1, Q>(a)
+        - christoffel_component<2, P, DIR>(g) * tensor_component<2, Q>(a)
+        - christoffel_component<0, Q, DIR>(g) * tensor_component<P, 0>(a)
+        - christoffel_component<1, Q, DIR>(g) * tensor_component<P, 1>(a)
+        - christoffel_component<2, Q, DIR>(g) * tensor_component<P, 2>(a)
+        - chi_derivative * tensor_component<P, Q>(a) / chin1;
+}
 
-    // Gamz (SSA)
-    Gamz_rhs[idx] += d_lopsided_point(dims, Gamz, Gamz_rhs, betax, betay, betaz, X, Y, Z, symmetry, SYM, SYM, ANTI, i, j, k);
-    if (eps > 0.0) Gamz_rhs[idx] += d_kodis_point(dims, Gamz, X, Y, Z, SYM, SYM, ANTI, symmetry, eps, i, j, k);
+template<int J>
+__global__ void rhs_momentum_constraint_kernel(
+    int ex0, int ex1, int ex2,
+    const double* X, const double* Y, const double* Z,
+    const double* chi, const double* trK,
+    const double* dxx, const double* gxy, const double* gxz,
+    const double* dyy, const double* gyz, const double* dzz,
+    const double* Axx, const double* Axy, const double* Axz,
+    const double* Ayy, const double* Ayz, const double* Azz,
+    const double* Gamxxx, const double* Gamxxy, const double* Gamxxz,
+    const double* Gamxyy, const double* Gamxyz, const double* Gamxzz,
+    const double* Gamyxx, const double* Gamyxy, const double* Gamyxz,
+    const double* Gamyyy, const double* Gamyyz, const double* Gamyzz,
+    const double* Gamzxx, const double* Gamzxy, const double* Gamzxz,
+    const double* Gamzyy, const double* Gamzyz, const double* Gamzzz,
+    const double* matter_momentum, double* momentum_residual,
+    int symmetry, int lev
+) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    const int j = blockIdx.y * blockDim.y + threadIdx.y;
+    const int k = blockIdx.z * blockDim.z + threadIdx.z;
+    if (i >= ex0 || j >= ex1 || k >= ex2) return;
+    const int idx = IDX3D(i, j, k, ex0, ex1, ex2);
+    const int dims[3] = {ex0, ex1, ex2};
 
-    // =========================================================
-    // Block 5: Gauge Variables - Lapse & Shift
-    // =========================================================
+    const InverseMetric inv = inverse_metric(
+        dxx[idx] + ONE, gxy[idx], gxz[idx],
+        dyy[idx] + ONE, gyz[idx], dzz[idx] + ONE
+    );
+    const SymmetricTensor a = {
+        Axx[idx], Axy[idx], Axz[idx], Ayy[idx], Ayz[idx], Azz[idx]
+    };
+    const Christoffel g = {
+        Gamxxx[idx], Gamxxy[idx], Gamxxz[idx],
+        Gamxyy[idx], Gamxyz[idx], Gamxzz[idx],
+        Gamyxx[idx], Gamyxy[idx], Gamyxz[idx],
+        Gamyyy[idx], Gamyyz[idx], Gamyzz[idx],
+        Gamzxx[idx], Gamzxy[idx], Gamzxz[idx],
+        Gamzyy[idx], Gamzyz[idx], Gamzzz[idx]
+    };
 
-    // Lap (SSS) - Note: bam code does not apply dissipation on gauge vars usually, but Fortran logic here DOES for Lap
-    Lap_rhs[idx] += d_lopsided_point(dims, Lap, Lap_rhs, betax, betay, betaz, X, Y, Z, symmetry, SYM, SYM, SYM, i, j, k);
-    if (eps > 0.0) Lap_rhs[idx] += d_kodis_point(dims, Lap, X, Y, Z, SYM, SYM, SYM, symmetry, eps, i, j, k);
+    double chix, chiy, chiz;
+    d_fderivs_point(
+        dims, chi, &chix, &chiy, &chiz, X, Y, Z,
+        SYM, SYM, SYM, symmetry, lev, i, j, k
+    );
 
-    // betax (ASS)
-    betax_rhs[idx] += d_lopsided_point(dims, betax, betax_rhs, betax, betay, betaz, X, Y, Z, symmetry, ANTI, SYM, SYM, i, j, k);
-    if (eps > 0.0) betax_rhs[idx] += d_kodis_point(dims, betax, X, Y, Z, ANTI, SYM, SYM, symmetry, eps, i, j, k);
+    const double* field0 = (J == 0) ? Axx : ((J == 1) ? Axy : Axz);
+    const double* field1 = (J == 0) ? Axy : ((J == 1) ? Ayy : Ayz);
+    const double* field2 = (J == 0) ? Axz : ((J == 1) ? Ayz : Azz);
 
-    // betay (SAS)
-    betay_rhs[idx] += d_lopsided_point(dims, betay, betay_rhs, betax, betay, betaz, X, Y, Z, symmetry, SYM, ANTI, SYM, i, j, k);
-    if (eps > 0.0) betay_rhs[idx] += d_kodis_point(dims, betay, X, Y, Z, SYM, ANTI, SYM, symmetry, eps, i, j, k);
+    double dx, dy, dz;
+    d_fderivs_point(
+        dims, field0, &dx, &dy, &dz, X, Y, Z,
+        (J == 0) ? SYM : ANTI,
+        (J == 1) ? ANTI : SYM,
+        (J == 2) ? ANTI : SYM,
+        symmetry, lev, i, j, k
+    );
+    double residual =
+        inv.xx * covariant_A_derivative<0, 0, J>(dx, a, g, chix, chi[idx] + ONE)
+        + inv.xy * covariant_A_derivative<1, 0, J>(dy, a, g, chiy, chi[idx] + ONE)
+        + inv.xz * covariant_A_derivative<2, 0, J>(dz, a, g, chiz, chi[idx] + ONE);
 
-    // betaz (SSA)
-    betaz_rhs[idx] += d_lopsided_point(dims, betaz, betaz_rhs, betax, betay, betaz, X, Y, Z, symmetry, SYM, SYM, ANTI, i, j, k);
-    if (eps > 0.0) betaz_rhs[idx] += d_kodis_point(dims, betaz, X, Y, Z, SYM, SYM, ANTI, symmetry, eps, i, j, k);
+    d_fderivs_point(
+        dims, field1, &dx, &dy, &dz, X, Y, Z,
+        (J == 0) ? ANTI : SYM,
+        (J == 1) ? SYM : ANTI,
+        (J == 2) ? ANTI : SYM,
+        symmetry, lev, i, j, k
+    );
+    residual +=
+        inv.xy * covariant_A_derivative<0, 1, J>(dx, a, g, chix, chi[idx] + ONE)
+        + inv.yy * covariant_A_derivative<1, 1, J>(dy, a, g, chiy, chi[idx] + ONE)
+        + inv.yz * covariant_A_derivative<2, 1, J>(dz, a, g, chiz, chi[idx] + ONE);
 
-    // =========================================================
-    // Block 6: Gauge Variables - Time derivative of Shift (dtSf)
-    // =========================================================
+    d_fderivs_point(
+        dims, field2, &dx, &dy, &dz, X, Y, Z,
+        (J == 0) ? ANTI : SYM,
+        (J == 1) ? ANTI : SYM,
+        (J == 2) ? SYM : ANTI,
+        symmetry, lev, i, j, k
+    );
+    residual +=
+        inv.xz * covariant_A_derivative<0, 2, J>(dx, a, g, chix, chi[idx] + ONE)
+        + inv.yz * covariant_A_derivative<1, 2, J>(dy, a, g, chiy, chi[idx] + ONE)
+        + inv.zz * covariant_A_derivative<2, 2, J>(dz, a, g, chiz, chi[idx] + ONE);
 
-    // dtSfx (ASS)
-    dtSfx_rhs[idx] += d_lopsided_point(dims, dtSfx, dtSfx_rhs, betax, betay, betaz, X, Y, Z, symmetry, ANTI, SYM, SYM, i, j, k);
-    if (eps > 0.0) dtSfx_rhs[idx] += d_kodis_point(dims, dtSfx, X, Y, Z, ANTI, SYM, SYM, symmetry, eps, i, j, k);
-
-    // dtSfy (SAS)
-    dtSfy_rhs[idx] += d_lopsided_point(dims, dtSfy, dtSfy_rhs, betax, betay, betaz, X, Y, Z, symmetry, SYM, ANTI, SYM, i, j, k);
-    if (eps > 0.0) dtSfy_rhs[idx] += d_kodis_point(dims, dtSfy, X, Y, Z, SYM, ANTI, SYM, symmetry, eps, i, j, k);
-
-    // dtSfz (SSA)
-    dtSfz_rhs[idx] += d_lopsided_point(dims, dtSfz, dtSfz_rhs, betax, betay, betaz, X, Y, Z, symmetry, SYM, SYM, ANTI, i, j, k);
-    if (eps > 0.0) dtSfz_rhs[idx] += d_kodis_point(dims, dtSfz, X, Y, Z, SYM, SYM, ANTI, symmetry, eps, i, j, k);
-
-    // ------------------------------------------------------------------------------------
-    // bssn_constraints_kernel
-    // ------------------------------------------------------------------------------------
-
-    if (co != 0) return;
-
-    // ==========================================
-    // 0. 加载数据
-    // ==========================================
-
-    // double gupxx = gupxx_in[idx]; double gupxy = gupxy_in[idx]; double gupxz = gupxz_in[idx];
-    // double gupyy = gupyy_in[idx]; double gupyz = gupyz_in[idx]; double gupzz = gupzz_in[idx];
-
-    // double l_Axx = Axx[idx]; double l_Axy = Axy[idx]; double l_Axz = Axz[idx];
-    // double l_Ayy = Ayy[idx]; double l_Ayz = Ayz[idx]; double l_Azz = Azz[idx];
-
-    // double l_Rxx = Rxx_in[idx]; double l_Rxy = Rxy_in[idx]; double l_Rxz = Rxz_in[idx];
-    // double l_Ryy = Ryy_in[idx]; double l_Ryz = Ryz_in[idx]; double l_Rzz = Rzz_in[idx];
-
-    // ==========================================
-    // 1. Hamiltonian Constraint
-    // ==========================================
-    // ham_Res = trR + 2/3 K^2 - A_ij A^ij - 16 PI rho
-
-    // 计算 trR (Respect to physical metric)
-    // Fortran Line 372
-    double ham_val = gupxx * l_Rxx + gupyy * l_Ryy + gupzz * l_Rzz + 
-               TWO * (gupxy * l_Rxy + gupxz * l_Rxz + gupyz * l_Ryz);
-
-    // double term_xx = gupxx * l_Axx * l_Axx + gupyy * l_Axy * l_Axy + gupzz * l_Axz * l_Axz + TWO * (gupxy * l_Axx * l_Axy + gupxz * l_Axx * l_Axz + gupyz * l_Axy * l_Axz);
-    // double term_yy = gupxx * l_Axy * l_Axy + gupyy * l_Ayy * l_Ayy + gupzz * l_Ayz * l_Ayz + TWO * (gupxy * l_Axy * l_Ayy + gupxz * l_Axy * l_Ayz + gupyz * l_Ayy * l_Ayz);
-    // double term_zz = gupxx * l_Axz * l_Axz + gupyy * l_Ayz * l_Ayz + gupzz * l_Azz * l_Azz + TWO * (gupxy * l_Axz * l_Ayz + gupxz * l_Axz * l_Azz + gupyz * l_Ayz * l_Azz);
-    
-    // double term_xy = gupxx * l_Axx * l_Axy + gupyy * l_Axy * l_Ayy + gupzz * l_Axz * l_Ayz + gupxy * (l_Axx * l_Ayy + l_Axy * l_Axy) + gupxz * (l_Axx * l_Ayz + l_Axz * l_Axy) + gupyz * (l_Axy * l_Ayz + l_Axz * l_Ayy);
-    // double term_xz = gupxx * l_Axx * l_Axz + gupyy * l_Axy * l_Ayz + gupzz * l_Axz * l_Azz + gupxy * (l_Axx * l_Ayz + l_Axy * l_Axz) + gupxz * (l_Axx * l_Azz + l_Axz * l_Axz) + gupyz * (l_Axy * l_Azz + l_Axz * l_Ayz);
-    // double term_yz = gupxx * l_Axy * l_Axz + gupyy * l_Ayy * l_Ayz + gupzz * l_Ayz * l_Azz + gupxy * (l_Axy * l_Ayz + l_Ayy * l_Axz) + gupxz * (l_Axy * l_Azz + l_Ayz * l_Axz) + gupyz * (l_Ayy * l_Azz + l_Ayz * l_Ayz);
-
-    // double trA2 = gupxx * term_xx + gupyy * term_yy + gupzz * term_zz + TWO * (gupxy * term_xy + gupxz * term_xz + gupyz * term_yz);
-
-    // Final Hamiltonian Calculation
-    // Fortran Line 375
-    ham_Res[idx] = chin1 * ham_val + F2o3 * val_trK * val_trK - trA2 - F16 * PI * rho[idx];
-    // ==========================================
-    // 2. Momentum Constraint
-    // ==========================================
-    // mov_Res_j = D_k A^k_j - 2/3 d_j trK - 8 PI S_j
-
-    // 需要 trK 的导数
-    // double Kx, Ky, Kz;
-    d_fderivs_point(dims, trK, &Kx, &Ky, &Kz, X, Y, Z, SYM, SYM, SYM, symmetry, lev, i, j, k);
-
-    // 需要 Aij 的导数 (Fortran calls fderivs 6 times)
-    // 为了节省寄存器和避免创建大数组，我们分量计算并直接应用 Covariant 修正
-    
-    // double chix = chix_in[idx];
-    // double chiy = chiy_in[idx];
-    // double chiz = chiz_in[idx];
-
-    // --- Compute D_i A_jk stored in variables named like `dA_xxx` (meaning D_x A_xx) ---
-    
-    // 1. Axx (SYM, SYM, SYM)
-    double d_Axx_x, d_Axx_y, d_Axx_z;
-    double d_Axy_x, d_Axy_y, d_Axy_z;
-    double d_Axz_x, d_Axz_y, d_Axz_z;
-    double d_Ayy_x, d_Ayy_y, d_Ayy_z;
-    double d_Ayz_x, d_Ayz_y, d_Ayz_z;
-    double d_Azz_x, d_Azz_y, d_Azz_z;
-    d_fderivs_point(dims, Axx, &d_Axx_x, &d_Axx_y, &d_Axx_z, X, Y, Z, SYM, SYM, SYM, symmetry, lev, i, j, k);
-    d_fderivs_point(dims, Axy, &d_Axy_x, &d_Axy_y, &d_Axy_z, X, Y, Z, ANTI, ANTI, SYM, symmetry, lev, i, j, k);
-    d_fderivs_point(dims, Axz, &d_Axz_x, &d_Axz_y, &d_Axz_z, X, Y, Z, ANTI, SYM, ANTI, symmetry, lev, i, j, k);
-    d_fderivs_point(dims, Ayy, &d_Ayy_x, &d_Ayy_y, &d_Ayy_z, X, Y, Z, SYM, SYM, SYM, symmetry, lev, i, j, k);
-    d_fderivs_point(dims, Ayz, &d_Ayz_x, &d_Ayz_y, &d_Ayz_z, X, Y, Z, SYM, ANTI, ANTI, symmetry, lev, i, j, k);
-    d_fderivs_point(dims, Azz, &d_Azz_x, &d_Azz_y, &d_Azz_z, X, Y, Z, SYM, SYM, SYM, symmetry, lev, i, j, k);
-
-
-    double DA_xxx = d_Axx_x - (l_Gamxxx * l_Axx + l_Gamyxx * l_Axy + l_Gamzxx * l_Axz 
-                             + l_Gamxxx * l_Axx + l_Gamyxx * l_Axy + l_Gamzxx * l_Axz) - chix * l_Axx / chin1;
-    double DA_xyx = d_Axy_x - (l_Gamxxy * l_Axx + l_Gamyxy * l_Axy + l_Gamzxy * l_Axz
-                             + l_Gamxxx * l_Axy + l_Gamyxx * l_Ayy + l_Gamzxx * l_Ayz) - chix * l_Axy / chin1;
-    double DA_xzx = d_Axz_x - (l_Gamxxz * l_Axx + l_Gamyxz * l_Axy + l_Gamzxz * l_Axz
-                             + l_Gamxxx * l_Axz + l_Gamyxx * l_Ayz + l_Gamzxx * l_Azz) - chix * l_Axz / chin1;
-    double DA_yyx = d_Ayy_x - (l_Gamxxy * l_Axy + l_Gamyxy * l_Ayy + l_Gamzxy * l_Ayz
-                             + l_Gamxxy * l_Axy + l_Gamyxy * l_Ayy + l_Gamzxy * l_Ayz) - chix * l_Ayy / chin1;
-    double DA_yzx = d_Ayz_x - (l_Gamxxz * l_Axy + l_Gamyxz * l_Ayy + l_Gamzxz * l_Ayz
-                             + l_Gamxxy * l_Axz + l_Gamyxy * l_Ayz + l_Gamzxy * l_Azz) - chix * l_Ayz / chin1;
-    double DA_zzx = d_Azz_x - (l_Gamxxz * l_Axz + l_Gamyxz * l_Ayz + l_Gamzxz * l_Azz
-                             + l_Gamxxz * l_Axz + l_Gamyxz * l_Ayz + l_Gamzxz * l_Azz) - chix * l_Azz / chin1;
-    double DA_xxy = d_Axx_y - (l_Gamxxy * l_Axx + l_Gamyxy * l_Axy + l_Gamzxy * l_Axz
-                             + l_Gamxxy * l_Axx + l_Gamyxy * l_Axy + l_Gamzxy * l_Axz) - chiy * l_Axx / chin1;
-    double DA_xyy = d_Axy_y - (l_Gamxyy * l_Axx + l_Gamyyy * l_Axy + l_Gamzyy * l_Axz
-                             + l_Gamxxy * l_Axy + l_Gamyxy * l_Ayy + l_Gamzxy * l_Ayz) - chiy * l_Axy / chin1;
-    double DA_xzy = d_Axz_y - (l_Gamxyz * l_Axx + l_Gamyyz * l_Axy + l_Gamzyz * l_Axz
-                             + l_Gamxxy * l_Axz + l_Gamyxy * l_Ayz + l_Gamzxy * l_Azz) - chiy * l_Axz / chin1;
-    double DA_yyy = d_Ayy_y - (l_Gamxyy * l_Axy + l_Gamyyy * l_Ayy + l_Gamzyy * l_Ayz
-                             + l_Gamxyy * l_Axy + l_Gamyyy * l_Ayy + l_Gamzyy * l_Ayz) - chiy * l_Ayy / chin1; 
-    double DA_yzy = d_Ayz_y - (l_Gamxyz * l_Axy + l_Gamyyz * l_Ayy + l_Gamzyz * l_Ayz
-                             + l_Gamxyy * l_Axz + l_Gamyyy * l_Ayz + l_Gamzyy * l_Azz) - chiy * l_Ayz / chin1;
-    double DA_zzy = d_Azz_y - (l_Gamxyz * l_Axz + l_Gamyyz * l_Ayz + l_Gamzyz * l_Azz
-                             + l_Gamxyz * l_Axz + l_Gamyyz * l_Ayz + l_Gamzyz * l_Azz) - chiy * l_Azz / chin1;
-    double DA_xxz = d_Axx_z - (l_Gamxxz * l_Axx + l_Gamyxz * l_Axy + l_Gamzxz * l_Axz
-                             + l_Gamxxz * l_Axx + l_Gamyxz * l_Axy + l_Gamzxz * l_Axz) - chiz * l_Axx / chin1;
-    double DA_xyz = d_Axy_z - (l_Gamxyz * l_Axx + l_Gamyyz * l_Axy + l_Gamzyz * l_Axz
-                             + l_Gamxxz * l_Axy + l_Gamyxz * l_Ayy + l_Gamzxz * l_Ayz) - chiz * l_Axy / chin1;
-    double DA_xzz = d_Axz_z - (l_Gamxzz * l_Axx + l_Gamyzz * l_Axy + l_Gamzzz * l_Axz
-                             + l_Gamxxz * l_Axz + l_Gamyxz * l_Ayz + l_Gamzxz * l_Azz) - chiz * l_Axz / chin1;
-    double DA_yyz = d_Ayy_z - (l_Gamxyz * l_Axy + l_Gamyyz * l_Ayy + l_Gamzyz * l_Ayz
-                             + l_Gamxyz * l_Axy + l_Gamyyz * l_Ayy + l_Gamzyz * l_Ayz) - chiz * l_Ayy / chin1;
-    double DA_yzz = d_Ayz_z - (l_Gamxzz * l_Axy + l_Gamyzz * l_Ayy + l_Gamzzz * l_Ayz
-                             + l_Gamxyz * l_Axz + l_Gamyyz * l_Ayz + l_Gamzyz * l_Azz) - chiz * l_Ayz / chin1;
-    double DA_zzz = d_Azz_z - (l_Gamxzz * l_Axz + l_Gamyzz * l_Ayz + l_Gamzzz * l_Azz
-                             + l_Gamxzz * l_Axz + l_Gamyzz * l_Ayz + l_Gamzzz * l_Azz) - chiz * l_Azz / chin1;
-
-
-    // ==========================================
-    // 3. Contraction (Compute mov_Res)
-    // ==========================================
-    
-    // movx_Res (Fortran Lines 424-426)
-    // Note: Use matching DA components. 
-    // gupxx*gxxx -> gupxx * DA_xxx
-    // gupyy*gxyy -> gupyy * DA_xyy
-    // gupzz*gxzz -> gupzz * DA_xzz
-    // gupxy*gxyx -> gupxy * DA_xyx
-    // gupxz*gxzx -> gupxz * DA_xzx
-    // gupyz*gxzy -> gupyz * DA_xzy
-    // gupxy*gxxy -> gupxy * DA_xxy
-    // gupxz*gxxz -> gupxz * DA_xxz
-    // gupyz*gxyz -> gupyz * DA_xyz
-    movx_Res[idx] = gupxx * DA_xxx + gupyy * DA_xyy + gupzz * DA_xzz
-                  + gupxy * DA_xyx + gupxz * DA_xzx + gupyz * DA_xzy
-                  + gupxy * DA_xxy + gupxz * DA_xxz + gupyz * DA_xyz;
-
-    // movy_Res (Fortran Lines 427-429)
-    movy_Res[idx] = gupxx * DA_xyx + gupyy * DA_yyy + gupzz * DA_yzz
-                  + gupxy * DA_yyx + gupxz * DA_yzx + gupyz * DA_yzy
-                  + gupxy * DA_xyy + gupxz * DA_xyz + gupyz * DA_yyz;
-
-    // movz_Res (Fortran Lines 430-432)
-    movz_Res[idx] = gupxx * DA_xzx + gupyy * DA_yzy + gupzz * DA_zzz
-                  + gupxy * DA_yzx + gupxz * DA_zzx + gupyz * DA_zzy
-                  + gupxy * DA_xzy + gupxz * DA_xzz + gupyz * DA_yzz; // Note: last term gupyz*gyzz -> DA_yzz
-
-    // Subtract K derivatives and Matter terms
-    // Fortran Lines 434-436
-    movx_Res[idx] = movx_Res[idx] - F2o3 * Kx - F8 * PI * Sx[idx];
-    movy_Res[idx] = movy_Res[idx] - F2o3 * Ky - F8 * PI * Sy[idx];
-    movz_Res[idx] = movz_Res[idx] - F2o3 * Kz - F8 * PI * Sz[idx];
+    double Kx, Ky, Kz;
+    d_fderivs_point(
+        dims, trK, &Kx, &Ky, &Kz, X, Y, Z,
+        SYM, SYM, SYM, symmetry, lev, i, j, k
+    );
+    const double K_derivative = (J == 0) ? Kx : ((J == 1) ? Ky : Kz);
+    momentum_residual[idx] =
+        residual - F2o3 * K_derivative - F8 * PI * matter_momentum[idx];
 }
 
 void gpu_compute_rhs_bssn_launch( // launch kernel with device pointers
@@ -1036,8 +1056,47 @@ void gpu_compute_rhs_bssn_launch( // launch kernel with device pointers
         (ex[1] + block.y - 1) / block.y,
         (ex[2] + block.z - 1) / block.z
     );
+    const int points = ex[0] * ex[1] * ex[2];
 
-    // 1. Kernel 1: Derivatives & Connection Coefficients
+    const MetricHessianBatch metric_hessian_batch = {
+        {d_dxx, d_dyy, d_dzz, d_gxy, d_gxz, d_gyz},
+        {d_Rxx, d_Ryy, d_Rzz, d_Rxy, d_Rxz, d_Ryz},
+        {
+            { 1,  1,  1}, { 1,  1,  1}, { 1,  1,  1},
+            {-1, -1,  1}, {-1,  1, -1}, { 1, -1, -1}
+        }
+    };
+    const int stencil_threads = 256;
+    const dim3 metric_hessian_grid(
+        (points + stencil_threads - 1) / stencil_threads, 3, 1
+    );
+    rhs_metric_hessian_batch_kernel<<<
+        metric_hessian_grid, stencil_threads, 0, stream
+    >>>(
+        ex[0], ex[1], ex[2], d_X, d_Y, d_Z,
+        d_dxx, d_gxy, d_gxz, d_dyy, d_gyz, d_dzz,
+        metric_hessian_batch, symmetry, lev
+    );
+
+    const ShiftHessianBatch shift_hessian_batch = {
+        {d_betax, d_betay, d_betaz},
+        {
+            {d_Gamxxx, d_Gamxxy, d_Gamxxz, d_Gamxyy, d_Gamxyz, d_Gamxzz},
+            {d_Gamyxx, d_Gamyxy, d_Gamyxz, d_Gamyyy, d_Gamyyz, d_Gamyzz},
+            {d_Gamzxx, d_Gamzxy, d_Gamzxz, d_Gamzyy, d_Gamzyz, d_Gamzzz}
+        },
+        {{-1, 1, 1}, {1, -1, 1}, {1, 1, -1}}
+    };
+    const dim3 shift_hessian_grid(
+        (points + stencil_threads - 1) / stencil_threads, 3, 1
+    );
+    rhs_shift_hessian_batch_kernel<<<
+        shift_hessian_grid, stencil_threads, 0, stream
+    >>>(
+        ex[0], ex[1], ex[2], d_X, d_Y, d_Z,
+        shift_hessian_batch, symmetry, lev
+    );
+
     rhs_kernel<<<grid, block, 0, stream>>>(
         ex[0], ex[1], ex[2], T, d_X, d_Y, d_Z,
         d_chi, d_trK,
@@ -1073,4 +1132,78 @@ void gpu_compute_rhs_bssn_launch( // launch kernel with device pointers
         d_Gmx_Res, d_Gmy_Res, d_Gmz_Res,
         symmetry, lev, eps, co
     );
+
+    const RhsAdvectionBatch advection_batch = {
+        {
+            d_dxx, d_gxy, d_gxz, d_dyy, d_gyz, d_dzz,
+            d_Axx, d_Axy, d_Axz, d_Ayy, d_Ayz, d_Azz,
+            d_chi, d_trK, d_Gamx, d_Gamy, d_Gamz, d_Lap,
+            d_betax, d_betay, d_betaz, d_dtSfx, d_dtSfy, d_dtSfz
+        },
+        {
+            d_gxx_rhs, d_gxy_rhs, d_gxz_rhs, d_gyy_rhs, d_gyz_rhs, d_gzz_rhs,
+            d_Axx_rhs, d_Axy_rhs, d_Axz_rhs, d_Ayy_rhs, d_Ayz_rhs, d_Azz_rhs,
+            d_chi_rhs, d_trK_rhs, d_Gamx_rhs, d_Gamy_rhs, d_Gamz_rhs, d_Lap_rhs,
+            d_betax_rhs, d_betay_rhs, d_betaz_rhs,
+            d_dtSfx_rhs, d_dtSfy_rhs, d_dtSfz_rhs
+        },
+        {
+            { 1,  1,  1}, {-1, -1,  1}, {-1,  1, -1},
+            { 1,  1,  1}, { 1, -1, -1}, { 1,  1,  1},
+            { 1,  1,  1}, {-1, -1,  1}, {-1,  1, -1},
+            { 1,  1,  1}, { 1, -1, -1}, { 1,  1,  1},
+            { 1,  1,  1}, { 1,  1,  1},
+            {-1,  1,  1}, { 1, -1,  1}, { 1,  1, -1},
+            { 1,  1,  1},
+            {-1,  1,  1}, { 1, -1,  1}, { 1,  1, -1},
+            {-1,  1,  1}, { 1, -1,  1}, { 1,  1, -1}
+        }
+    };
+    const int advection_threads = 256;
+    const dim3 advection_grid(
+        (points + advection_threads - 1) / advection_threads, 6, 1
+    );
+    rhs_advection_ko_batch_kernel<<<advection_grid, advection_threads, 0, stream>>>(
+        ex[0], ex[1], ex[2], d_X, d_Y, d_Z,
+        d_betax, d_betay, d_betaz, advection_batch, symmetry, eps
+    );
+
+    if (co == 0) {
+        rhs_hamiltonian_constraint_kernel<<<grid, block, 0, stream>>>(
+            ex[0], ex[1], ex[2],
+            d_chi, d_trK,
+            d_dxx, d_gxy, d_gxz, d_dyy, d_gyz, d_dzz,
+            d_Axx, d_Axy, d_Axz, d_Ayy, d_Ayz, d_Azz,
+            d_Rxx, d_Rxy, d_Rxz, d_Ryy, d_Ryz, d_Rzz,
+            d_rho, d_ham_Res
+        );
+
+        rhs_momentum_constraint_kernel<0><<<grid, block, 0, stream>>>(
+            ex[0], ex[1], ex[2], d_X, d_Y, d_Z, d_chi, d_trK,
+            d_dxx, d_gxy, d_gxz, d_dyy, d_gyz, d_dzz,
+            d_Axx, d_Axy, d_Axz, d_Ayy, d_Ayz, d_Azz,
+            d_Gamxxx, d_Gamxxy, d_Gamxxz, d_Gamxyy, d_Gamxyz, d_Gamxzz,
+            d_Gamyxx, d_Gamyxy, d_Gamyxz, d_Gamyyy, d_Gamyyz, d_Gamyzz,
+            d_Gamzxx, d_Gamzxy, d_Gamzxz, d_Gamzyy, d_Gamzyz, d_Gamzzz,
+            d_Sx, d_movx_Res, symmetry, lev
+        );
+        rhs_momentum_constraint_kernel<1><<<grid, block, 0, stream>>>(
+            ex[0], ex[1], ex[2], d_X, d_Y, d_Z, d_chi, d_trK,
+            d_dxx, d_gxy, d_gxz, d_dyy, d_gyz, d_dzz,
+            d_Axx, d_Axy, d_Axz, d_Ayy, d_Ayz, d_Azz,
+            d_Gamxxx, d_Gamxxy, d_Gamxxz, d_Gamxyy, d_Gamxyz, d_Gamxzz,
+            d_Gamyxx, d_Gamyxy, d_Gamyxz, d_Gamyyy, d_Gamyyz, d_Gamyzz,
+            d_Gamzxx, d_Gamzxy, d_Gamzxz, d_Gamzyy, d_Gamzyz, d_Gamzzz,
+            d_Sy, d_movy_Res, symmetry, lev
+        );
+        rhs_momentum_constraint_kernel<2><<<grid, block, 0, stream>>>(
+            ex[0], ex[1], ex[2], d_X, d_Y, d_Z, d_chi, d_trK,
+            d_dxx, d_gxy, d_gxz, d_dyy, d_gyz, d_dzz,
+            d_Axx, d_Axy, d_Axz, d_Ayy, d_Ayz, d_Azz,
+            d_Gamxxx, d_Gamxxy, d_Gamxxz, d_Gamxyy, d_Gamxyz, d_Gamxzz,
+            d_Gamyxx, d_Gamyxy, d_Gamyxz, d_Gamyyy, d_Gamyyz, d_Gamyzz,
+            d_Gamzxx, d_Gamzxy, d_Gamzxz, d_Gamzyy, d_Gamzyz, d_Gamzzz,
+            d_Sz, d_movz_Res, symmetry, lev
+        );
+    }
 }
