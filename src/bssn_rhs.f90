@@ -85,6 +85,7 @@
 
   real*8,dimension(3) ::SSS,AAS,ASA,SAA,ASS,SAS,SSA
   real*8            :: dX, dY, dZ, PI
+  integer :: i, j, k
   real*8, parameter :: ZEO = 0.d0,ONE = 1.D0, TWO = 2.D0, FOUR = 4.D0
   real*8, parameter :: EIGHT = 8.D0, HALF = 0.5D0, THR = 3.d0
   real*8, parameter :: SYM = 1.D0, ANTI= - 1.D0
@@ -94,6 +95,7 @@
 
 
 
+#ifdef AMSS_ENABLE_RHS_SANITY_CHECK
 !!! sanity check
   dX = sum(chi)+sum(trK)+sum(dxx)+sum(gxy)+sum(gxz)+sum(dyy)+sum(gyz)+sum(dzz) &
       +sum(Axx)+sum(Axy)+sum(Axz)+sum(Ayy)+sum(Ayz)+sum(Azz)                   &
@@ -124,6 +126,7 @@
      gont = 1
      return
   endif
+#endif
 
   PI = dacos(-ONE)
 
@@ -131,11 +134,28 @@
   dY = Y(2) - Y(1)
   dZ = Z(2) - Z(1)
 
+#ifdef AMSS_ENABLE_RHS_METRIC_FUSION
+! These five fields are independent pointwise transforms.  Keep them in one
+! contiguous traversal so their input values are loaded together.
+  do k=1,ex(3)
+  do j=1,ex(2)
+!$omp simd
+  do i=1,ex(1)
+    alpn1(i,j,k) = Lap(i,j,k) + ONE
+    chin1(i,j,k) = chi(i,j,k) + ONE
+    gxx(i,j,k) = dxx(i,j,k) + ONE
+    gyy(i,j,k) = dyy(i,j,k) + ONE
+    gzz(i,j,k) = dzz(i,j,k) + ONE
+  enddo
+  enddo
+  enddo
+#else
   alpn1 = Lap + ONE
   chin1 = chi + ONE
   gxx = dxx + ONE
   gyy = dyy + ONE
   gzz = dzz + ONE
+#endif
 
   call fderivs(ex,betax,betaxx,betaxy,betaxz,X,Y,Z,ANTI, SYM, SYM,Symmetry,Lev)
   call fderivs(ex,betay,betayx,betayy,betayz,X,Y,Z, SYM,ANTI, SYM,Symmetry,Lev)
@@ -154,6 +174,47 @@
   call fderivs(ex,gyz,gyzx,gyzy,gyzz,X,Y,Z,SYM ,ANTI,ANTI,Symmetry,Lev)
   call fderivs(ex,dzz,gzzx,gzzy,gzzz,X,Y,Z,SYM ,SYM ,SYM ,Symmetry,Lev)
 
+#ifdef AMSS_ENABLE_RHS_METRIC_FUSION
+! The six metric RHS expressions are pointwise independent.  Fuse their
+! traversal after all metric derivatives have been produced.
+  do k=1,ex(3)
+  do j=1,ex(2)
+!$omp simd
+  do i=1,ex(1)
+    gxx_rhs(i,j,k) = - TWO * alpn1(i,j,k) * Axx(i,j,k) - &
+                     F2o3 * gxx(i,j,k) * div_beta(i,j,k) + &
+                     TWO * (gxx(i,j,k) * betaxx(i,j,k) + &
+                            gxy(i,j,k) * betayx(i,j,k) + &
+                            gxz(i,j,k) * betazx(i,j,k))
+    gyy_rhs(i,j,k) = - TWO * alpn1(i,j,k) * Ayy(i,j,k) - &
+                     F2o3 * gyy(i,j,k) * div_beta(i,j,k) + &
+                     TWO * (gxy(i,j,k) * betaxy(i,j,k) + &
+                            gyy(i,j,k) * betayy(i,j,k) + &
+                            gyz(i,j,k) * betazy(i,j,k))
+    gzz_rhs(i,j,k) = - TWO * alpn1(i,j,k) * Azz(i,j,k) - &
+                     F2o3 * gzz(i,j,k) * div_beta(i,j,k) + &
+                     TWO * (gxz(i,j,k) * betaxz(i,j,k) + &
+                            gyz(i,j,k) * betayz(i,j,k) + &
+                            gzz(i,j,k) * betazz(i,j,k))
+    gxy_rhs(i,j,k) = - TWO * alpn1(i,j,k) * Axy(i,j,k) + &
+                     F1o3 * gxy(i,j,k) * div_beta(i,j,k) + &
+                     gxx(i,j,k) * betaxy(i,j,k) + gxz(i,j,k) * betazy(i,j,k) + &
+                     gyy(i,j,k) * betayx(i,j,k) + gyz(i,j,k) * betazx(i,j,k) - &
+                     gxy(i,j,k) * betazz(i,j,k)
+    gyz_rhs(i,j,k) = - TWO * alpn1(i,j,k) * Ayz(i,j,k) + &
+                     F1o3 * gyz(i,j,k) * div_beta(i,j,k) + &
+                     gxy(i,j,k) * betaxz(i,j,k) + gyy(i,j,k) * betayz(i,j,k) + &
+                     gxz(i,j,k) * betaxy(i,j,k) + gzz(i,j,k) * betazy(i,j,k) - &
+                     gyz(i,j,k) * betaxx(i,j,k)
+    gxz_rhs(i,j,k) = - TWO * alpn1(i,j,k) * Axz(i,j,k) + &
+                     F1o3 * gxz(i,j,k) * div_beta(i,j,k) + &
+                     gxx(i,j,k) * betaxz(i,j,k) + gxy(i,j,k) * betayz(i,j,k) + &
+                     gyz(i,j,k) * betayx(i,j,k) + gzz(i,j,k) * betazx(i,j,k) - &
+                     gxz(i,j,k) * betayy(i,j,k)
+  enddo
+  enddo
+  enddo
+#else
   gxx_rhs = - TWO * alpn1 * Axx    -  F2o3 * gxx * div_beta          + &
               TWO *(  gxx * betaxx +   gxy * betayx +   gxz * betazx)
 
@@ -177,6 +238,7 @@
                       gxx * betaxz +   gxy * betayz                  + &
                                        gyz * betayx +   gzz * betazx   &
                                                     -   gxz * betayy     !rhs for gij
+#endif
 
 ! invert tilted metric
   gupzz =  gxx * gyy * gzz + gxy * gyz * gxz + gxz * gxy * gyz - &
@@ -322,6 +384,41 @@
   call fderivs(ex,Gamy,Gamyx,Gamyy,Gamyz,X,Y,Z,SYM ,ANTI,SYM ,Symmetry,Lev)
   call fderivs(ex,Gamz,Gamzx,Gamzy,Gamzz,X,Y,Z,SYM ,SYM ,ANTI,Symmetry,Lev)
 
+#ifdef AMSS_ENABLE_RHS_GAMMA_FUSION
+! Gamma RHS components are independent pointwise updates.  Keep their
+! arithmetic order, but traverse the block once instead of three times.
+  do k=1,ex(3)
+  do j=1,ex(2)
+!$omp simd
+  do i=1,ex(1)
+    Gamx_rhs(i,j,k) = Gamx_rhs(i,j,k) + F2o3 * Gamxa(i,j,k) * div_beta(i,j,k) - &
+      Gamxa(i,j,k) * betaxx(i,j,k) - Gamya(i,j,k) * betaxy(i,j,k) - &
+      Gamza(i,j,k) * betaxz(i,j,k) + &
+      F1o3 * (gupxx(i,j,k) * fxx(i,j,k) + gupxy(i,j,k) * fxy(i,j,k) + &
+              gupxz(i,j,k) * fxz(i,j,k)) + &
+      gupxx(i,j,k) * gxxx(i,j,k) + gupyy(i,j,k) * gyyx(i,j,k) + &
+      gupzz(i,j,k) * gzzx(i,j,k) + TWO * (gupxy(i,j,k) * gxyx(i,j,k) + &
+      gupxz(i,j,k) * gxzx(i,j,k) + gupyz(i,j,k) * gyzx(i,j,k))
+    Gamy_rhs(i,j,k) = Gamy_rhs(i,j,k) + F2o3 * Gamya(i,j,k) * div_beta(i,j,k) - &
+      Gamxa(i,j,k) * betayx(i,j,k) - Gamya(i,j,k) * betayy(i,j,k) - &
+      Gamza(i,j,k) * betayz(i,j,k) + &
+      F1o3 * (gupxy(i,j,k) * fxx(i,j,k) + gupyy(i,j,k) * fxy(i,j,k) + &
+              gupyz(i,j,k) * fxz(i,j,k)) + &
+      gupxx(i,j,k) * gxxy(i,j,k) + gupyy(i,j,k) * gyyy(i,j,k) + &
+      gupzz(i,j,k) * gzzy(i,j,k) + TWO * (gupxy(i,j,k) * gxyy(i,j,k) + &
+      gupxz(i,j,k) * gxzy(i,j,k) + gupyz(i,j,k) * gyzy(i,j,k))
+    Gamz_rhs(i,j,k) = Gamz_rhs(i,j,k) + F2o3 * Gamza(i,j,k) * div_beta(i,j,k) - &
+      Gamxa(i,j,k) * betazx(i,j,k) - Gamya(i,j,k) * betazy(i,j,k) - &
+      Gamza(i,j,k) * betazz(i,j,k) + &
+      F1o3 * (gupxz(i,j,k) * fxx(i,j,k) + gupyz(i,j,k) * fxy(i,j,k) + &
+              gupzz(i,j,k) * fxz(i,j,k)) + &
+      gupxx(i,j,k) * gxxz(i,j,k) + gupyy(i,j,k) * gyyz(i,j,k) + &
+      gupzz(i,j,k) * gzzz(i,j,k) + TWO * (gupxy(i,j,k) * gxyz(i,j,k) + &
+      gupxz(i,j,k) * gxzz(i,j,k) + gupyz(i,j,k) * gyzz(i,j,k))
+  enddo
+  enddo
+  enddo
+#else
   Gamx_rhs =               Gamx_rhs +  F2o3 *  Gamxa * div_beta        - &
                      Gamxa * betaxx - Gamya * betaxy - Gamza * betaxz  + &
              F1o3 * (gupxx * fxx    + gupxy * fxy    + gupxz * fxz    ) + &
@@ -339,6 +436,7 @@
              F1o3 * (gupxz * fxx    + gupyz * fxy    + gupzz * fxz    ) + &
                      gupxx * gxxz   + gupyy * gyyz   + gupzz * gzzz    + &
               TWO * (gupxy * gxyz   + gupxz * gxzz   + gupyz * gyzz  )    !rhs for Gam^i
+#endif
 
 !first kind of connection stored in gij,k
   gxxx = gxx * Gamxxx + gxy * Gamyxx + gxz * Gamzxx
