@@ -68,18 +68,17 @@ export OMP_NUM_THREADS="$omp_threads"
 export OMP_PROC_BIND="${OMP_PROC_BIND:-close}"
 export OMP_PLACES="${OMP_PLACES:-cores}"
 
-# Keep more block tasks than workers so a worker finishing an inexpensive block
-# can take another one.  The tested 30-core configuration is 60 blocks with
-# 24 static-level workers and 30 moving-level workers.  Keep that validated
-# target on the 60-core evaluation node too; a new 120-block decomposition
-# would change numerical block boundaries without having been validated.
+# Keep the block geometry matched to the worker geometry.  On the current
+# 30-physical-core SMT node this gives 24 static-level and 30 moving-level
+# blocks/workers.  The P4 sweep showed that 60/90 blocks add boundary and
+# synchronization work without improving end-to-end time.  The formula scales
+# with a future allocation while all four values remain overridable.
 static_threads=$((omp_threads * 4 / 5))
 static_threads=$((static_threads > 0 ? static_threads : 1))
-block_target=$((omp_threads < 60 ? 60 : omp_threads))
 export AMSS_OMP_BLOCK_SCHEDULE="${AMSS_OMP_BLOCK_SCHEDULE:-dynamic,1}"
 export OMP_SCHEDULE="${OMP_SCHEDULE:-$AMSS_OMP_BLOCK_SCHEDULE}"
-export AMSS_OMP_STATIC_BLOCK_TARGET="${AMSS_OMP_STATIC_BLOCK_TARGET:-$block_target}"
-export AMSS_OMP_MOVING_BLOCK_TARGET="${AMSS_OMP_MOVING_BLOCK_TARGET:-$block_target}"
+export AMSS_OMP_STATIC_BLOCK_TARGET="${AMSS_OMP_STATIC_BLOCK_TARGET:-$static_threads}"
+export AMSS_OMP_MOVING_BLOCK_TARGET="${AMSS_OMP_MOVING_BLOCK_TARGET:-$omp_threads}"
 export AMSS_OMP_STATIC_THREADS="${AMSS_OMP_STATIC_THREADS:-$static_threads}"
 export AMSS_OMP_MOVING_THREADS="${AMSS_OMP_MOVING_THREADS:-$omp_threads}"
 export AMSS_OMP_ONLY_RUN=1
