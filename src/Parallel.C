@@ -2561,6 +2561,30 @@ struct OmpLocalTransferOp
     size_t size;
 };
 
+bool omp_transfer_target_regions_overlap(
+    const Parallel::gridseg &a, const Parallel::gridseg &b)
+{
+    for (int direction = 0; direction < dim; ++direction)
+    {
+        const double spacing =
+            (a.Bg->bbox[dim + direction] - a.Bg->bbox[direction]) /
+            a.Bg->shape[direction];
+        const int a_lo = static_cast<int>(
+            (a.llb[direction] - a.Bg->bbox[direction]) / spacing);
+        const int a_hi = a.Bg->shape[direction] - 1 -
+            static_cast<int>((a.Bg->bbox[dim + direction] -
+                              a.uub[direction]) / spacing);
+        const int b_lo = static_cast<int>(
+            (b.llb[direction] - b.Bg->bbox[direction]) / spacing);
+        const int b_hi = b.Bg->shape[direction] - 1 -
+            static_cast<int>((b.Bg->bbox[dim + direction] -
+                              b.uub[direction]) / spacing);
+        if (a_hi < b_lo || b_hi < a_lo)
+            return false;
+    }
+    return true;
+}
+
 vector<double> &omp_transfer_workspace()
 {
     static vector<double> workspace;
@@ -2629,6 +2653,106 @@ void omp_local_transfer(MyList<Parallel::gridseg> *src, MyList<Parallel::gridseg
     if (total_size == 0)
         return;
 
+    int DIM = dim;
+
+#ifdef AMSS_OMP_DIRECT_AMR_TRANSFER
+    if (!mixed && type != 1)
+    {
+        // Source and destination levels use different Block allocations. Keep
+        // each target array's segment order serial, but run independent
+        // target arrays as separate OpenMP tasks.
+        map<double *, size_t> group_map;
+        vector<vector<size_t> > groups;
+        for (size_t op_index = 0; op_index < ops.size(); ++op_index)
+        {
+            OmpLocalTransferOp &op = ops[op_index];
+            double *target = op.dst->Bg->fgfs[op.dst_var->sgfn];
+            map<double *, size_t>::iterator found = group_map.find(target);
+            size_t group_index;
+            if (found == group_map.end())
+            {
+                group_index = groups.size();
+                group_map[target] = group_index;
+                groups.push_back(vector<size_t>());
+            }
+            else
+                group_index = found->second;
+            groups[group_index].push_back(op_index);
+        }
+
+        vector<vector<size_t> > tasks;
+#ifdef AMSS_ENABLE_OMP_DIRECT_AMR_SPLIT
+        for (size_t group_index = 0; group_index < groups.size(); ++group_index)
+        {
+            vector<size_t> &group = groups[group_index];
+            bool overlap = false;
+            for (size_t i = 0; i < group.size() && !overlap; ++i)
+                for (size_t j = 0; j < i; ++j)
+                    if (omp_transfer_target_regions_overlap(
+                            *ops[group[i]].dst, *ops[group[j]].dst))
+                    {
+                        overlap = true;
+                        break;
+                    }
+            if (overlap)
+                tasks.push_back(group);
+            else
+                for (size_t i = 0; i < group.size(); ++i)
+                    tasks.push_back(vector<size_t>(1, group[i]));
+        }
+#else
+        tasks.swap(groups);
+#endif
+
+#pragma omp parallel if (tasks.size() > 1)
+        {
+#pragma omp for schedule(dynamic, 1)
+            for (int group_index = 0;
+                 group_index < static_cast<int>(tasks.size()); ++group_index)
+            {
+                vector<size_t> &group = tasks[group_index];
+                for (size_t member = 0; member < group.size(); ++member)
+                {
+                    OmpLocalTransferOp &op = ops[group[member]];
+                    double *target =
+                        op.dst->Bg->fgfs[op.dst_var->sgfn];
+                    if (type == 2)
+                    {
+                        f_restrict3(
+                            DIM, op.dst->Bg->bbox,
+                            op.dst->Bg->bbox + dim, op.dst->Bg->shape, target,
+                            op.src->Bg->bbox, op.src->Bg->bbox + dim,
+                            op.src->Bg->shape,
+                            op.src->Bg->fgfs[op.src_var->sgfn],
+                            op.dst->llb, op.dst->uub, op.src_var->SoA,
+                            Symmetry);
+                    }
+                    else
+                    {
+                        f_prolong3(
+                            DIM, op.src->Bg->bbox,
+                            op.src->Bg->bbox + dim, op.src->Bg->shape,
+                            op.src->Bg->fgfs[op.src_var->sgfn],
+                            op.dst->Bg->bbox,
+                            op.dst->Bg->bbox + dim, op.dst->Bg->shape,
+                            target, op.dst->llb, op.dst->uub,
+                            op.src_var->SoA, Symmetry);
+                    }
+                }
+            }
+        }
+#ifdef AMSS_OMP_DIRECT_AMR_TRANSFER
+        static unsigned long direct_transfer_diagnostics = 0;
+        if (direct_transfer_diagnostics < 64)
+            cout << "OMP_AMR_DIRECT type=" << type
+                 << " ops=" << ops.size()
+                 << " groups=" << tasks.size() << endl;
+        ++direct_transfer_diagnostics;
+#endif
+        return;
+    }
+#endif
+
     // The OpenMP-only control path enters transfers sequentially at
     // synchronization boundaries. Reuse the largest packed workspace seen so
     // far instead of allocating and freeing it for every RK/AMR transfer.
@@ -2636,7 +2760,6 @@ void omp_local_transfer(MyList<Parallel::gridseg> *src, MyList<Parallel::gridseg
     if (data_workspace.size() < total_size)
         data_workspace.resize(total_size);
     double *data = data_workspace.data();
-    int DIM = dim;
 
     // Preserve the MPI path's pack-before-unpack ordering. Packing only reads
     // grid data, so individual segment/variable operations are independent.
