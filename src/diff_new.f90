@@ -69,9 +69,37 @@
   d2dy = ONE/TWO/dY
   d2dz = ONE/TWO/dZ
 
+#ifdef AMSS_FDERIVS_BOUNDARY_INIT
+! Only uncovered boundary planes need a defined zero.
+  fx(ex(1),:,:) = ZEO
+  fy(ex(1),:,:) = ZEO
+  fz(ex(1),:,:) = ZEO
+  fx(:,ex(2),:) = ZEO
+  fy(:,ex(2),:) = ZEO
+  fz(:,ex(2),:) = ZEO
+  fx(:,:,ex(3)) = ZEO
+  fy(:,:,ex(3)) = ZEO
+  fz(:,:,ex(3)) = ZEO
+  if (imin == 1) then
+    fx(1,:,:) = ZEO
+    fy(1,:,:) = ZEO
+    fz(1,:,:) = ZEO
+  endif
+  if (jmin == 1) then
+    fx(:,1,:) = ZEO
+    fy(:,1,:) = ZEO
+    fz(:,1,:) = ZEO
+  endif
+  if (kmin == 1) then
+    fx(:,:,1) = ZEO
+    fy(:,:,1) = ZEO
+    fz(:,:,1) = ZEO
+  endif
+#else
   fx = ZEO
   fy = ZEO
   fz = ZEO
+#endif
 
 #ifdef AMSS_FDERIVS_SIMD
 ! The active BAM-comparison path uses one common order in all directions.
@@ -520,12 +548,58 @@
   Fdxdz = F1o144 /( dX * dZ )
   Fdydz = F1o144 /( dY * dZ )
 
+#ifdef AMSS_FDDERIVS_BOUNDARY_INIT
+! Only uncovered boundary planes need a defined zero.
+  fxx(ex(1),:,:) = ZEO
+  fyy(ex(1),:,:) = ZEO
+  fzz(ex(1),:,:) = ZEO
+  fxy(ex(1),:,:) = ZEO
+  fxz(ex(1),:,:) = ZEO
+  fyz(ex(1),:,:) = ZEO
+  fxx(:,ex(2),:) = ZEO
+  fyy(:,ex(2),:) = ZEO
+  fzz(:,ex(2),:) = ZEO
+  fxy(:,ex(2),:) = ZEO
+  fxz(:,ex(2),:) = ZEO
+  fyz(:,ex(2),:) = ZEO
+  fxx(:,:,ex(3)) = ZEO
+  fyy(:,:,ex(3)) = ZEO
+  fzz(:,:,ex(3)) = ZEO
+  fxy(:,:,ex(3)) = ZEO
+  fxz(:,:,ex(3)) = ZEO
+  fyz(:,:,ex(3)) = ZEO
+  if (imin == 1) then
+    fxx(1,:,:) = ZEO
+    fyy(1,:,:) = ZEO
+    fzz(1,:,:) = ZEO
+    fxy(1,:,:) = ZEO
+    fxz(1,:,:) = ZEO
+    fyz(1,:,:) = ZEO
+  endif
+  if (jmin == 1) then
+    fxx(:,1,:) = ZEO
+    fyy(:,1,:) = ZEO
+    fzz(:,1,:) = ZEO
+    fxy(:,1,:) = ZEO
+    fxz(:,1,:) = ZEO
+    fyz(:,1,:) = ZEO
+  endif
+  if (kmin == 1) then
+    fxx(:,:,1) = ZEO
+    fyy(:,:,1) = ZEO
+    fzz(:,:,1) = ZEO
+    fxy(:,:,1) = ZEO
+    fxz(:,:,1) = ZEO
+    fyz(:,:,1) = ZEO
+  endif
+#else
   fxx = ZEO
   fyy = ZEO
   fzz = ZEO
   fxy = ZEO
   fxz = ZEO
   fyz = ZEO
+#endif
 
 #ifdef AMSS_FDDERIVS_SIMD
 ! The active (BAM comparison) path uses the fourth-order stencil only when
