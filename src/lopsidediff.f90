@@ -26,21 +26,37 @@
 !
 !-----------------------------------------------------------------------------
 
-subroutine lopsided(ex,X,Y,Z,f,f_rhs,Sfx,Sfy,Sfz,Symmetry,SoA)
+subroutine lopsided(ex,X,Y,Z,f,f_rhs,Sfx,Sfy,Sfz,Symmetry,SoA,shell_only)
+  implicit none
+  integer, intent(in) :: ex(1:3), Symmetry
+  real*8, intent(in) :: X(1:ex(1)),Y(1:ex(2)),Z(1:ex(3))
+  real*8, dimension(ex(1),ex(2),ex(3)), intent(in) :: f,Sfx,Sfy,Sfz
+  real*8, dimension(ex(1),ex(2),ex(3)), intent(inout) :: f_rhs
+  real*8, dimension(3), intent(in) :: SoA
+  logical, intent(in) :: shell_only
+  real*8, dimension(-2:ex(1),-2:ex(2),-2:ex(3)) :: fh
+
+  call symmetry_bd(3,ex,f,fh,SoA)
+  call lopsided_core(ex,X,Y,Z,f_rhs,Sfx,Sfy,Sfz,Symmetry,SoA,shell_only,fh)
+end subroutine lopsided
+
+subroutine lopsided_core(ex,X,Y,Z,f_rhs,Sfx,Sfy,Sfz,Symmetry,SoA,shell_only,fh)
   implicit none
 
 !~~~~~~> Input parameters:
 
   integer, intent(in)  :: ex(1:3),Symmetry
   real*8,  intent(in)  :: X(1:ex(1)),Y(1:ex(2)),Z(1:ex(3))
-  real*8,dimension(ex(1),ex(2),ex(3)),intent(in)   :: f,Sfx,Sfy,Sfz
+  real*8,dimension(ex(1),ex(2),ex(3)),intent(in)   :: Sfx,Sfy,Sfz
 
   real*8,dimension(ex(1),ex(2),ex(3)),intent(inout):: f_rhs
   real*8,dimension(3),intent(in) ::SoA
+  logical, intent(in) :: shell_only
+  logical :: shell_only_local
+  real*8,dimension(-2:ex(1),-2:ex(2),-2:ex(3)),intent(in) :: fh
 
 !~~~~~~> local variables:
 ! note index -2,-1,0, so we have 3 extra points
-  real*8,dimension(-2:ex(1),-2:ex(2),-2:ex(3))   :: fh
   integer :: imin,jmin,kmin,imax,jmax,kmax,i,j,k
   integer :: ibegin,iend,jbegin,jend,kbegin,kend
   real*8 :: dX,dY,dZ
@@ -50,6 +66,8 @@ subroutine lopsided(ex,X,Y,Z,f,f_rhs,Sfx,Sfy,Sfz,Symmetry,SoA)
   real*8,  parameter :: TWO=2.d0,F6=6.0d0,F18=1.8d1
   real*8,  parameter :: F12=1.2d1, F10=1.d1,EIT=8.d0
   integer, parameter :: NO_SYMM = 0, EQ_SYMM = 1, OCTANT = 2
+
+  shell_only_local = shell_only
 
   dX = X(2)-X(1)
   dY = Y(2)-Y(1)
@@ -74,7 +92,6 @@ subroutine lopsided(ex,X,Y,Z,f,f_rhs,Sfx,Sfy,Sfz,Symmetry,SoA)
   if(Symmetry > EQ_SYMM .and. dabs(X(1)) < dX) imin = -2
   if(Symmetry > EQ_SYMM .and. dabs(Y(1)) < dY) jmin = -2
 
-  call symmetry_bd(3,ex,f,fh,SoA)
 
 #ifdef AMSS_LOPSIDEDIFF_SIMD
 ! The deep interior always has all points needed by the fourth-order
@@ -87,7 +104,7 @@ subroutine lopsided(ex,X,Y,Z,f,f_rhs,Sfx,Sfy,Sfz,Symmetry,SoA)
   kbegin = max(1, kmin+3)
   kend   = min(ex(3)-1, kmax-3)
 
-  if (ibegin <= iend .and. jbegin <= jend .and. kbegin <= kend) then
+  if (.not. shell_only_local .and. ibegin <= iend .and. jbegin <= jend .and. kbegin <= kend) then
     do k=kbegin,kend
     do j=jbegin,jend
 !$omp simd
@@ -381,5 +398,4 @@ subroutine lopsided(ex,X,Y,Z,f,f_rhs,Sfx,Sfy,Sfz,Symmetry,SoA)
 
   return
 
-  end subroutine lopsided
-
+  end subroutine lopsided_core
