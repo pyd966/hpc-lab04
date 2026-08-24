@@ -68,15 +68,19 @@ export OMP_NUM_THREADS="$omp_threads"
 export OMP_PROC_BIND="${OMP_PROC_BIND:-close}"
 export OMP_PLACES="${OMP_PLACES:-cores}"
 
-# Static levels have at most 32 useful Blocks on the course grid. Using 80%
-# of the full team reduces idle participants there, while moving levels keep
-# all available cores. The same ratio gives 24/30 on the current node and
-# 48/60 on the physical-core-only evaluation node.
-static_target=$((omp_threads * 4 / 5))
-static_target=$((static_target > 0 ? static_target : 1))
-export AMSS_OMP_STATIC_BLOCK_TARGET="${AMSS_OMP_STATIC_BLOCK_TARGET:-$static_target}"
-export AMSS_OMP_MOVING_BLOCK_TARGET="${AMSS_OMP_MOVING_BLOCK_TARGET:-$omp_threads}"
-export AMSS_OMP_STATIC_THREADS="${AMSS_OMP_STATIC_THREADS:-$static_target}"
+# Keep more block tasks than workers so a worker finishing an inexpensive block
+# can take another one.  The tested 30-core configuration is 60 blocks with
+# 24 static-level workers and 30 moving-level workers.  Keep that validated
+# target on the 60-core evaluation node too; a new 120-block decomposition
+# would change numerical block boundaries without having been validated.
+static_threads=$((omp_threads * 4 / 5))
+static_threads=$((static_threads > 0 ? static_threads : 1))
+block_target=$((omp_threads < 60 ? 60 : omp_threads))
+export AMSS_OMP_BLOCK_SCHEDULE="${AMSS_OMP_BLOCK_SCHEDULE:-dynamic,1}"
+export OMP_SCHEDULE="${OMP_SCHEDULE:-$AMSS_OMP_BLOCK_SCHEDULE}"
+export AMSS_OMP_STATIC_BLOCK_TARGET="${AMSS_OMP_STATIC_BLOCK_TARGET:-$block_target}"
+export AMSS_OMP_MOVING_BLOCK_TARGET="${AMSS_OMP_MOVING_BLOCK_TARGET:-$block_target}"
+export AMSS_OMP_STATIC_THREADS="${AMSS_OMP_STATIC_THREADS:-$static_threads}"
 export AMSS_OMP_MOVING_THREADS="${AMSS_OMP_MOVING_THREADS:-$omp_threads}"
 export AMSS_OMP_ONLY_RUN=1
 export AMSS_OUTPUT_ROOT="$RUN_ROOT"
@@ -91,7 +95,7 @@ else
     BUILD_OPT='-O3'
 fi
 
-echo "OpenMP policy: total=$OMP_NUM_THREADS, static blocks/threads=" \
+echo "OpenMP policy: schedule=$OMP_SCHEDULE, total=$OMP_NUM_THREADS, static blocks/threads=" \
      "$AMSS_OMP_STATIC_BLOCK_TARGET/$AMSS_OMP_STATIC_THREADS, " \
      "moving blocks/threads=" \
      "$AMSS_OMP_MOVING_BLOCK_TARGET/$AMSS_OMP_MOVING_THREADS"

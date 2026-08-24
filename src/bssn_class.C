@@ -2044,7 +2044,7 @@ void bssn_class::Step(int lev, int YN)
   if (lev < GH->movls)
     ndeps = numepsb;
   double TRK4 = PhysTime;
-  int iter_count = 0; // count RK4 substeps
+  int predictor_iter = 0;
   int pre = 0, cor = 1;
   int ERROR = 0;
 
@@ -2070,9 +2070,16 @@ void bssn_class::Step(int lev, int YN)
   vector<double> omp_rhs_times(omp_blocks.size(), 0);
   vector<double> omp_update_times(omp_blocks.size(), 0);
   double omp_phase_start = omp_get_wtime();
+  double omp_sync_start = 0;
   const int omp_phase_threads = omp_get_max_threads();
 #endif
-  #pragma omp parallel for schedule(static) if (omp_blocks.size() > 1) reduction(|:ERROR)
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+  #pragma omp parallel shared(ERROR, TRK4)
+  {
+  #pragma omp for schedule(runtime)
+#else
+  #pragma omp parallel for schedule(runtime) if (omp_blocks.size() > 1) reduction(|:ERROR)
+#endif
   for (int block_index = 0; block_index < static_cast<int>(omp_blocks.size()); ++block_index)
   {
     Patch *patch = omp_blocks[block_index].first;
@@ -2134,6 +2141,9 @@ void bssn_class::Step(int lev, int YN)
                  << cg->bbox[1] << ":" << cg->bbox[4] << ","
                  << cg->bbox[2] << ":" << cg->bbox[5] << ")" << endl;
           }
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+          #pragma omp atomic write
+#endif
           ERROR = 1;
         }
 #ifdef AMSS_OMP_DIAGNOSTICS
@@ -2159,7 +2169,7 @@ void bssn_class::Step(int lev, int YN)
                                cg->fgfs[varl0->data->sgfn], 
                                cg->fgfs[varl->data->sgfn], 
                                cg->fgfs[varlrhs->data->sgfn],
-                               iter_count);
+                               predictor_iter);
             if (lev > 0) // fix BD point
               f_sommerfeld_rout(cg->shape, cg->X[0], cg->X[1], cg->X[2],
                                 patch->bbox[0], patch->bbox[1], patch->bbox[2],
@@ -2183,11 +2193,22 @@ void bssn_class::Step(int lev, int YN)
 #endif
   }
 #ifdef AMSS_OMP_DIAGNOSTICS
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+  #pragma omp single
+  {
+#endif
   omp_record_block_phase(lev, omp_phase_threads,
                          omp_get_wtime() - omp_phase_start,
                          omp_enforce_times, omp_rhs_times, omp_update_times);
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+  }
+#endif
 #endif
   // check error information
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+  #pragma omp single
+  {
+#endif
 #ifndef AMSS_OMP_ONLY
   {
     int erh = ERROR;
@@ -2204,29 +2225,69 @@ void bssn_class::Step(int lev, int YN)
       MPI_Abort(MPI_COMM_WORLD, 1);
     }
   }
-
-
-#ifdef AMSS_OMP_DIAGNOSTICS
-  double omp_sync_start = omp_get_wtime();
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+  }
+  #pragma omp barrier
 #endif
-  Parallel::Sync(GH->PatL[lev], SynchList_pre, Symmetry);
+
+
 #ifdef AMSS_OMP_DIAGNOSTICS
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+  #pragma omp single
+  {
+#endif
+  omp_sync_start = omp_get_wtime();
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+  }
+#endif
+#endif
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+  Parallel::Sync_OMP_Team(GH->PatL[lev], SynchList_pre, Symmetry);
+#else
+  Parallel::Sync(GH->PatL[lev], SynchList_pre, Symmetry);
+#endif
+#ifdef AMSS_OMP_DIAGNOSTICS
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+  #pragma omp single
+  {
+#endif
   omp_record_sync(lev, omp_get_wtime() - omp_sync_start);
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+  }
+#endif
 #endif
 
   // corrector
-  for (iter_count = 1; iter_count < 4; iter_count++)
+  for (int rk_iter = 1; rk_iter < 4; rk_iter++)
   {
     // for RK4: t0, t0+dt/2, t0+dt/2, t0+dt;
-    if (iter_count == 1 || iter_count == 3)
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+    #pragma omp single
+    {
+#endif
+    if (rk_iter == 1 || rk_iter == 3)
       TRK4 += dT_lev / 2;
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+    }
+#endif
 #ifdef AMSS_OMP_DIAGNOSTICS
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+    #pragma omp single
+    {
+#endif
     omp_enforce_times.assign(omp_blocks.size(), 0);
     omp_rhs_times.assign(omp_blocks.size(), 0);
     omp_update_times.assign(omp_blocks.size(), 0);
     omp_phase_start = omp_get_wtime();
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+    }
 #endif
-    #pragma omp parallel for schedule(static) if (omp_blocks.size() > 1) reduction(|:ERROR)
+#endif
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+    #pragma omp for schedule(runtime)
+#else
+    #pragma omp parallel for schedule(runtime) if (omp_blocks.size() > 1) reduction(|:ERROR)
+#endif
     for (int block_index = 0; block_index < static_cast<int>(omp_blocks.size()); ++block_index)
     {
       Patch *patch = omp_blocks[block_index].first;
@@ -2288,7 +2349,10 @@ void bssn_class::Step(int lev, int YN)
                    << cg->bbox[1] << ":" << cg->bbox[4] << ","
                    << cg->bbox[2] << ":" << cg->bbox[5] << ")" << endl;
             }
-            ERROR = 1;
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+          #pragma omp atomic write
+#endif
+          ERROR = 1;
           }
 #ifdef AMSS_OMP_DIAGNOSTICS
           omp_rhs_times[block_index] = omp_get_wtime() - omp_component_start;
@@ -2310,7 +2374,7 @@ void bssn_class::Step(int lev, int YN)
                                  cg->fgfs[varl0->data->sgfn], 
                                  cg->fgfs[varl1->data->sgfn], 
                                  cg->fgfs[varlrhs->data->sgfn],
-                                 iter_count);
+                                 rk_iter);
 
               if (lev > 0) // fix BD point
                 f_sommerfeld_rout(cg->shape, cg->X[0], cg->X[1], cg->X[2],
@@ -2336,12 +2400,23 @@ void bssn_class::Step(int lev, int YN)
 #endif
     }
 #ifdef AMSS_OMP_DIAGNOSTICS
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+    #pragma omp single
+    {
+#endif
     omp_record_block_phase(lev, omp_phase_threads,
                            omp_get_wtime() - omp_phase_start,
                            omp_enforce_times, omp_rhs_times, omp_update_times);
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+    }
+#endif
 #endif
 
     // check error information
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+    #pragma omp single
+    {
+#endif
 #ifndef AMSS_OMP_ONLY
     {
       int erh = ERROR;
@@ -2355,26 +2430,52 @@ void bssn_class::Step(int lev, int YN)
       if (myrank == 0)
       {
         if (ErrorMonitor->outfile)
-          ErrorMonitor->outfile << "find NaN in RK4 substep#" << iter_count 
+          ErrorMonitor->outfile << "find NaN in RK4 substep#" << rk_iter
                                 << " variables at t = " << PhysTime 
                                 << ", lev = " << lev << endl;
         MPI_Abort(MPI_COMM_WORLD, 1);
       }
     }
-
-
-#ifdef AMSS_OMP_DIAGNOSTICS
-    omp_sync_start = omp_get_wtime();
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+    }
+    #pragma omp barrier
 #endif
-    Parallel::Sync(GH->PatL[lev], SynchList_cor, Symmetry);
+
+
 #ifdef AMSS_OMP_DIAGNOSTICS
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+    #pragma omp single
+    {
+#endif
+    omp_sync_start = omp_get_wtime();
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+    }
+#endif
+#endif
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+    Parallel::Sync_OMP_Team(GH->PatL[lev], SynchList_cor, Symmetry);
+#else
+    Parallel::Sync(GH->PatL[lev], SynchList_cor, Symmetry);
+#endif
+#ifdef AMSS_OMP_DIAGNOSTICS
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+    #pragma omp single
+    {
+#endif
     omp_record_sync(lev, omp_get_wtime() - omp_sync_start);
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+    }
+#endif
 #endif
 
     // swap time level
-    if (iter_count < 3)
+    if (rk_iter < 3)
     {
-      #pragma omp parallel for schedule(static) if (omp_blocks.size() > 1)
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+      #pragma omp for schedule(runtime)
+#else
+      #pragma omp parallel for schedule(runtime) if (omp_blocks.size() > 1)
+#endif
       for (int block_index = 0; block_index < static_cast<int>(omp_blocks.size()); ++block_index)
       {
         Block *cg = omp_blocks[block_index].second;
@@ -2389,13 +2490,20 @@ void bssn_class::Step(int lev, int YN)
   //
   // OldStateList  old -----------
   // update
-  #pragma omp parallel for schedule(static) if (omp_blocks.size() > 1)
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+  #pragma omp for schedule(runtime)
+#else
+  #pragma omp parallel for schedule(runtime) if (omp_blocks.size() > 1)
+#endif
   for (int block_index = 0; block_index < static_cast<int>(omp_blocks.size()); ++block_index)
   {
     Block *cg = omp_blocks[block_index].second;
     cg->swapList(StateList, SynchList_cor, myrank);
     cg->swapList(OldStateList, SynchList_cor, myrank);
   }
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+  }
+#endif
   // for black hole position
   if (BH_num > 0 && lev == GH->levels - 1)
   {
