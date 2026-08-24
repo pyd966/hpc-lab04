@@ -432,7 +432,9 @@ subroutine symmetry_bd(ord,extc,func,funcc,SoA)
 
   integer::i
 
+#ifndef AMSS_SYMMETRY_BD_NO_CLEAR
   funcc = 0.d0
+#endif
   funcc(1:extc(1),1:extc(2),1:extc(3)) = func
    do i=0,ord-1
       funcc(-i,1:extc(2),1:extc(3)) = funcc(i+1,1:extc(2),1:extc(3))*SoA(1)
