@@ -77,6 +77,6 @@ subroutine lopsided2(ex,X,Y,Z,f1,f1_rhs,f2,f2_rhs,Sfx,Sfy,Sfz,Symmetry,SoA1,SoA2
 #endif
 
   ! Keep all boundary and low-order cases on the original implementation.
-  call lopsided_core(ex,X,Y,Z,f1_rhs,Sfx,Sfy,Sfz,Symmetry,SoA1,.true.,fh1)
-  call lopsided_core(ex,X,Y,Z,f2_rhs,Sfx,Sfy,Sfz,Symmetry,SoA2,.true.,fh2)
+  call lopsided_core(ex,X,Y,Z,f1,f1_rhs,Sfx,Sfy,Sfz,Symmetry,SoA1,.true.,fh1)
+  call lopsided_core(ex,X,Y,Z,f2,f2_rhs,Sfx,Sfy,Sfz,Symmetry,SoA2,.true.,fh2)
 end subroutine lopsided2

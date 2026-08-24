@@ -36,18 +36,26 @@ subroutine lopsided(ex,X,Y,Z,f,f_rhs,Sfx,Sfy,Sfz,Symmetry,SoA,shell_only)
   logical, intent(in) :: shell_only
   real*8, dimension(-2:ex(1),-2:ex(2),-2:ex(3)) :: fh
 
+#ifdef AMSS_LOPSIDEDIFF_GHOST_ONLY
+  if (shell_only) then
+    call symmetry_bd(3,ex,f,fh,SoA)
+  else
+    call symmetry_bd_partial(3,ex,f,fh,SoA,6)
+  endif
+#else
   call symmetry_bd(3,ex,f,fh,SoA)
-  call lopsided_core(ex,X,Y,Z,f_rhs,Sfx,Sfy,Sfz,Symmetry,SoA,shell_only,fh)
+#endif
+  call lopsided_core(ex,X,Y,Z,f,f_rhs,Sfx,Sfy,Sfz,Symmetry,SoA,shell_only,fh)
 end subroutine lopsided
 
-subroutine lopsided_core(ex,X,Y,Z,f_rhs,Sfx,Sfy,Sfz,Symmetry,SoA,shell_only,fh)
+subroutine lopsided_core(ex,X,Y,Z,f,f_rhs,Sfx,Sfy,Sfz,Symmetry,SoA,shell_only,fh)
   implicit none
 
 !~~~~~~> Input parameters:
 
   integer, intent(in)  :: ex(1:3),Symmetry
   real*8,  intent(in)  :: X(1:ex(1)),Y(1:ex(2)),Z(1:ex(3))
-  real*8,dimension(ex(1),ex(2),ex(3)),intent(in)   :: Sfx,Sfy,Sfz
+  real*8,dimension(ex(1),ex(2),ex(3)),intent(in)   :: f,Sfx,Sfy,Sfz
 
   real*8,dimension(ex(1),ex(2),ex(3)),intent(inout):: f_rhs
   real*8,dimension(3),intent(in) ::SoA
@@ -94,15 +102,29 @@ subroutine lopsided_core(ex,X,Y,Z,f_rhs,Sfx,Sfy,Sfz,Symmetry,SoA,shell_only,fh)
 
 
 #ifdef AMSS_LOPSIDEDIFF_SIMD
+#ifdef AMSS_LOPSIDEDIFF_GHOST_ONLY
+#define AMSS_LDVAL(i,j,k) f(i,j,k)
+#else
+#define AMSS_LDVAL(i,j,k) fh(i,j,k)
+#endif
 ! The deep interior always has all points needed by the fourth-order
 ! one-sided stencil.  Isolating it removes the boundary-order branches from
 ! the hot loop; the original loop below remains responsible for the shell.
+#ifdef AMSS_LOPSIDEDIFF_GHOST_ONLY
+  ibegin = max(4, imin+3)
+  iend   = min(ex(1)-1, imax-3)
+  jbegin = max(4, jmin+3)
+  jend   = min(ex(2)-1, jmax-3)
+  kbegin = max(4, kmin+3)
+  kend   = min(ex(3)-1, kmax-3)
+#else
   ibegin = max(1, imin+3)
   iend   = min(ex(1)-1, imax-3)
   jbegin = max(1, jmin+3)
   jend   = min(ex(2)-1, jmax-3)
   kbegin = max(1, kmin+3)
   kend   = min(ex(3)-1, kmax-3)
+#endif
 
   if (.not. shell_only_local .and. ibegin <= iend .and. jbegin <= jend .and. kbegin <= kend) then
     do k=kbegin,kend
@@ -110,23 +132,23 @@ subroutine lopsided_core(ex,X,Y,Z,f_rhs,Sfx,Sfy,Sfz,Symmetry,SoA,shell_only,fh)
 !$omp simd
     do i=ibegin,iend
       advx = max(Sfx(i,j,k),ZEO)*d12dx* &
-                   (-F3*fh(i-1,j,k)-F10*fh(i,j,k)+F18*fh(i+1,j,k) &
-                    -F6*fh(i+2,j,k)+fh(i+3,j,k)) &
+                   (-F3*AMSS_LDVAL(i-1,j,k)-F10*AMSS_LDVAL(i,j,k)+F18*AMSS_LDVAL(i+1,j,k) &
+                    -F6*AMSS_LDVAL(i+2,j,k)+AMSS_LDVAL(i+3,j,k)) &
            - min(Sfx(i,j,k),ZEO)*d12dx* &
-                   (-F3*fh(i+1,j,k)-F10*fh(i,j,k)+F18*fh(i-1,j,k) &
-                    -F6*fh(i-2,j,k)+fh(i-3,j,k))
+                   (-F3*AMSS_LDVAL(i+1,j,k)-F10*AMSS_LDVAL(i,j,k)+F18*AMSS_LDVAL(i-1,j,k) &
+                    -F6*AMSS_LDVAL(i-2,j,k)+AMSS_LDVAL(i-3,j,k))
       advy = max(Sfy(i,j,k),ZEO)*d12dy* &
-                   (-F3*fh(i,j-1,k)-F10*fh(i,j,k)+F18*fh(i,j+1,k) &
-                    -F6*fh(i,j+2,k)+fh(i,j+3,k)) &
+                   (-F3*AMSS_LDVAL(i,j-1,k)-F10*AMSS_LDVAL(i,j,k)+F18*AMSS_LDVAL(i,j+1,k) &
+                    -F6*AMSS_LDVAL(i,j+2,k)+AMSS_LDVAL(i,j+3,k)) &
            - min(Sfy(i,j,k),ZEO)*d12dy* &
-                   (-F3*fh(i,j+1,k)-F10*fh(i,j,k)+F18*fh(i,j-1,k) &
-                    -F6*fh(i,j-2,k)+fh(i,j-3,k))
+                   (-F3*AMSS_LDVAL(i,j+1,k)-F10*AMSS_LDVAL(i,j,k)+F18*AMSS_LDVAL(i,j-1,k) &
+                    -F6*AMSS_LDVAL(i,j-2,k)+AMSS_LDVAL(i,j-3,k))
       advz = max(Sfz(i,j,k),ZEO)*d12dz* &
-                   (-F3*fh(i,j,k-1)-F10*fh(i,j,k)+F18*fh(i,j,k+1) &
-                    -F6*fh(i,j,k+2)+fh(i,j,k+3)) &
+                   (-F3*AMSS_LDVAL(i,j,k-1)-F10*AMSS_LDVAL(i,j,k)+F18*AMSS_LDVAL(i,j,k+1) &
+                    -F6*AMSS_LDVAL(i,j,k+2)+AMSS_LDVAL(i,j,k+3)) &
            - min(Sfz(i,j,k),ZEO)*d12dz* &
-                   (-F3*fh(i,j,k+1)-F10*fh(i,j,k)+F18*fh(i,j,k-1) &
-                    -F6*fh(i,j,k-2)+fh(i,j,k-3))
+                   (-F3*AMSS_LDVAL(i,j,k+1)-F10*AMSS_LDVAL(i,j,k)+F18*AMSS_LDVAL(i,j,k-1) &
+                    -F6*AMSS_LDVAL(i,j,k-2)+AMSS_LDVAL(i,j,k-3))
       f_rhs(i,j,k)=f_rhs(i,j,k)+advx
       f_rhs(i,j,k)=f_rhs(i,j,k)+advy
       f_rhs(i,j,k)=f_rhs(i,j,k)+advz
@@ -134,6 +156,9 @@ subroutine lopsided_core(ex,X,Y,Z,f_rhs,Sfx,Sfy,Sfz,Symmetry,SoA,shell_only,fh)
     enddo
     enddo
   endif
+#ifdef AMSS_LOPSIDEDIFF_GHOST_ONLY
+#undef AMSS_LDVAL
+#endif
 #endif
 
 ! upper bound set ex-1 only for efficiency, 
