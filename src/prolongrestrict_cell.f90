@@ -2022,6 +2022,11 @@
 
   call symmetry_bd(3,extc,func,funcc,SoA)
 
+#ifdef AMSS_PROLONG3_PAIRWISE
+  call prolong3_pair_kernel(extc,extf,funcc,funf,lbc,lbf, &
+       imino,imaxo,jmino,jmaxo,kmino,kmaxo)
+  return
+#endif
      
 !~~~~~~> prolongation start...
   do k = kmino,kmaxo
@@ -2169,6 +2174,118 @@
   return
 
   end subroutine prolong3
+
+#ifdef AMSS_PROLONG3_PAIRWISE
+! Reuse the z/y interpolation for the two fine points that share one coarse
+! x index.  A possible odd leading fine point is evaluated once, then the
+! main loop advances by two points with fixed even x parity.
+  subroutine prolong3_pair_kernel(extc,extf,funcc,funf,lbc,lbf, &
+       imino,imaxo,jmino,jmaxo,kmino,kmaxo)
+  implicit none
+  integer,intent(in) :: extc(3),extf(3),lbc(3),lbf(3)
+  integer,intent(in) :: imino,imaxo,jmino,jmaxo,kmino,kmaxo
+  real*8,dimension(-2:extc(1),-2:extc(2),-2:extc(3)),intent(in) :: funcc
+  real*8,dimension(extf(1),extf(2),extf(3)),intent(inout) :: funf
+  real*8,dimension(6,6) :: tmp2
+  real*8,dimension(6) :: tmp1
+  real*8,parameter :: C1=7.7d1/8.192d3,C2=-6.93d2/8.192d3
+  real*8,parameter :: C3=3.465d3/4.096d3,C6=6.3d1/8.192d3
+  real*8,parameter :: C5=-4.95d2/8.192d3,C4=1.155d3/4.096d3
+  integer :: i,j,k,ii,jj,kk,cix,ciy,ciz,ipair
+
+  ipair=imino
+  if(mod(ipair+lbf(1)-1,2).ne.0) ipair=ipair+1
+  do k=kmino,kmaxo
+    kk=k+lbf(3)-1
+    ciz=kk/2-lbc(3)+1
+    do j=jmino,jmaxo
+      jj=j+lbf(2)-1
+      ciy=jj/2-lbc(2)+1
+
+      if(ipair.gt.imino)then
+        ii=imino+lbf(1)-1
+        cix=ii/2-lbc(1)+1
+        call prolong3_pair_point(funcc,extc,cix,ciy,ciz,ii,jj,kk, &
+             funf(imino,j,k))
+      endif
+
+      do i=ipair,imaxo,2
+        ii=i+lbf(1)-1
+        cix=ii/2-lbc(1)+1
+        if(kk/2*2.eq.kk)then
+          tmp2=C1*funcc(cix-2:cix+3,ciy-2:ciy+3,ciz-2)+ &
+               C2*funcc(cix-2:cix+3,ciy-2:ciy+3,ciz-1)+ &
+               C3*funcc(cix-2:cix+3,ciy-2:ciy+3,ciz  )+ &
+               C4*funcc(cix-2:cix+3,ciy-2:ciy+3,ciz+1)+ &
+               C5*funcc(cix-2:cix+3,ciy-2:ciy+3,ciz+2)+ &
+               C6*funcc(cix-2:cix+3,ciy-2:ciy+3,ciz+3)
+        else
+          tmp2=C6*funcc(cix-2:cix+3,ciy-2:ciy+3,ciz-2)+ &
+               C5*funcc(cix-2:cix+3,ciy-2:ciy+3,ciz-1)+ &
+               C4*funcc(cix-2:cix+3,ciy-2:ciy+3,ciz  )+ &
+               C3*funcc(cix-2:cix+3,ciy-2:ciy+3,ciz+1)+ &
+               C2*funcc(cix-2:cix+3,ciy-2:ciy+3,ciz+2)+ &
+               C1*funcc(cix-2:cix+3,ciy-2:ciy+3,ciz+3)
+        endif
+        if(jj/2*2.eq.jj)then
+          tmp1=C1*tmp2(:,1)+C2*tmp2(:,2)+C3*tmp2(:,3)+ &
+               C4*tmp2(:,4)+C5*tmp2(:,5)+C6*tmp2(:,6)
+        else
+          tmp1=C6*tmp2(:,1)+C5*tmp2(:,2)+C4*tmp2(:,3)+ &
+               C3*tmp2(:,4)+C2*tmp2(:,5)+C1*tmp2(:,6)
+        endif
+        funf(i,j,k)=C1*tmp1(1)+C2*tmp1(2)+C3*tmp1(3)+ &
+                    C4*tmp1(4)+C5*tmp1(5)+C6*tmp1(6)
+        if(i.lt.imaxo)then
+          funf(i+1,j,k)=C6*tmp1(1)+C5*tmp1(2)+C4*tmp1(3)+ &
+                        C3*tmp1(4)+C2*tmp1(5)+C1*tmp1(6)
+        endif
+      enddo
+    enddo
+  enddo
+  end subroutine prolong3_pair_kernel
+
+  subroutine prolong3_pair_point(funcc,extc,cix,ciy,ciz,ii,jj,kk,value)
+  implicit none
+  integer,intent(in) :: extc(3),cix,ciy,ciz,ii,jj,kk
+  real*8,dimension(-2:extc(1),-2:extc(2),-2:extc(3)),intent(in) :: funcc
+  real*8,intent(out) :: value
+  real*8,dimension(6,6) :: tmp2
+  real*8,dimension(6) :: tmp1
+  real*8,parameter :: C1=7.7d1/8.192d3,C2=-6.93d2/8.192d3
+  real*8,parameter :: C3=3.465d3/4.096d3,C6=6.3d1/8.192d3
+  real*8,parameter :: C5=-4.95d2/8.192d3,C4=1.155d3/4.096d3
+  if(kk/2*2.eq.kk)then
+    tmp2=C1*funcc(cix-2:cix+3,ciy-2:ciy+3,ciz-2)+ &
+         C2*funcc(cix-2:cix+3,ciy-2:ciy+3,ciz-1)+ &
+         C3*funcc(cix-2:cix+3,ciy-2:ciy+3,ciz  )+ &
+         C4*funcc(cix-2:cix+3,ciy-2:ciy+3,ciz+1)+ &
+         C5*funcc(cix-2:cix+3,ciy-2:ciy+3,ciz+2)+ &
+         C6*funcc(cix-2:cix+3,ciy-2:ciy+3,ciz+3)
+  else
+    tmp2=C6*funcc(cix-2:cix+3,ciy-2:ciy+3,ciz-2)+ &
+         C5*funcc(cix-2:cix+3,ciy-2:ciy+3,ciz-1)+ &
+         C4*funcc(cix-2:cix+3,ciy-2:ciy+3,ciz  )+ &
+         C3*funcc(cix-2:cix+3,ciy-2:ciy+3,ciz+1)+ &
+         C2*funcc(cix-2:cix+3,ciy-2:ciy+3,ciz+2)+ &
+         C1*funcc(cix-2:cix+3,ciy-2:ciy+3,ciz+3)
+  endif
+  if(jj/2*2.eq.jj)then
+    tmp1=C1*tmp2(:,1)+C2*tmp2(:,2)+C3*tmp2(:,3)+ &
+         C4*tmp2(:,4)+C5*tmp2(:,5)+C6*tmp2(:,6)
+  else
+    tmp1=C6*tmp2(:,1)+C5*tmp2(:,2)+C4*tmp2(:,3)+ &
+         C3*tmp2(:,4)+C2*tmp2(:,5)+C1*tmp2(:,6)
+  endif
+  if(ii/2*2.eq.ii)then
+    value=C1*tmp1(1)+C2*tmp1(2)+C3*tmp1(3)+C4*tmp1(4)+ &
+          C5*tmp1(5)+C6*tmp1(6)
+  else
+    value=C6*tmp1(1)+C5*tmp1(2)+C4*tmp1(3)+C3*tmp1(4)+ &
+          C2*tmp1(5)+C1*tmp1(6)
+  endif
+  end subroutine prolong3_pair_point
+#endif
 
 #else 
   subroutine prolong3(wei,llbc,uubc,extc,func,&
