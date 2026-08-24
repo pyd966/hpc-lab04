@@ -2715,9 +2715,106 @@ struct OmpCachedSyncTransfer
     vector<OmpLocalTransferOp> ops;
     size_t total_size;
     int type;
+    bool direct_safe;
 
-    OmpCachedSyncTransfer() : total_size(0), type(0) {}
+    OmpCachedSyncTransfer() : total_size(0), type(0), direct_safe(false) {}
 };
+
+
+struct OmpSyncIndexBox
+{
+    int lo[dim];
+    int hi[dim];
+};
+
+bool omp_sync_copy_box(const Parallel::gridseg &segment,
+                       const double *llb, const double *uub,
+                       OmpSyncIndexBox &box)
+{
+    for (int direction = 0; direction < dim; ++direction)
+    {
+        const double spacing =
+            (segment.Bg->bbox[dim + direction] - segment.Bg->bbox[direction]) /
+            segment.Bg->shape[direction];
+        box.lo[direction] = static_cast<int>(
+            (llb[direction] - segment.Bg->bbox[direction]) / spacing);
+        box.hi[direction] = segment.Bg->shape[direction] - 1 -
+            static_cast<int>((segment.Bg->bbox[dim + direction] -
+                              uub[direction]) / spacing);
+        if (box.lo[direction] < 0 ||
+            box.hi[direction] >= segment.Bg->shape[direction] ||
+            box.lo[direction] > box.hi[direction])
+            return false;
+    }
+    return true;
+}
+
+bool omp_sync_boxes_overlap(const OmpSyncIndexBox &a,
+                            const OmpSyncIndexBox &b)
+{
+    for (int direction = 0; direction < dim; ++direction)
+        if (a.hi[direction] < b.lo[direction] ||
+            b.hi[direction] < a.lo[direction])
+            return false;
+    return true;
+}
+
+struct OmpSyncCopyRegion
+{
+    const double *source;
+    const double *target;
+    OmpSyncIndexBox source_box;
+    OmpSyncIndexBox target_box;
+};
+
+bool omp_sync_direct_copy_safe(const vector<OmpLocalTransferOp> &ops)
+{
+    if (ops.empty())
+        return false;
+
+    // Compare actual rectangles used by f_copy: direct writes may not alter
+    // another source read or race with another transfer writing target cells.
+    vector<OmpSyncCopyRegion> regions(ops.size());
+    for (size_t i = 0; i < ops.size(); ++i)
+    {
+        const OmpLocalTransferOp &op = ops[i];
+        OmpSyncCopyRegion &region = regions[i];
+        region.source = op.src->Bg->fgfs[op.src_var->sgfn];
+        region.target = op.dst->Bg->fgfs[op.dst_var->sgfn];
+        if (!region.source || !region.target ||
+            !omp_sync_copy_box(*op.src, op.dst->llb, op.dst->uub,
+                               region.source_box) ||
+            !omp_sync_copy_box(*op.dst, op.dst->llb, op.dst->uub,
+                               region.target_box))
+            return false;
+    }
+
+    for (size_t i = 0; i < regions.size(); ++i)
+    {
+        const OmpSyncCopyRegion &current = regions[i];
+        if (current.source == current.target &&
+            omp_sync_boxes_overlap(current.source_box, current.target_box))
+            return false;
+        for (size_t j = 0; j < i; ++j)
+        {
+            const OmpSyncCopyRegion &previous = regions[j];
+            if (current.target == previous.target &&
+                omp_sync_boxes_overlap(current.target_box,
+                                       previous.target_box))
+                return false;
+            if (current.target == previous.source &&
+                omp_sync_boxes_overlap(current.target_box,
+                                       previous.source_box))
+                return false;
+            if (previous.target == current.source &&
+                omp_sync_boxes_overlap(previous.target_box,
+                                       current.source_box))
+                return false;
+        }
+    }
+
+    return true;
+}
 
 struct OmpSyncGeometry
 {
@@ -2910,6 +3007,13 @@ OmpCachedSyncTransfer *omp_build_cached_sync_transfer(
         src = src->next;
         dst = dst->next;
     }
+    plan->direct_safe = plan->type == 1 &&
+                        omp_sync_direct_copy_safe(plan->ops);
+#ifdef AMSS_OMP_DIRECT_SYNC
+    cout << "OMP_SYNC_DIRECT type=" << plan->type
+         << " ops=" << plan->ops.size()
+         << " direct_safe=" << (plan->direct_safe ? 1 : 0) << endl;
+#endif
     return plan;
 }
 
@@ -2935,11 +3039,36 @@ void omp_execute_cached_sync(
     if (plan.total_size == 0)
         return;
 
+    int DIM = dim;
+
+#ifdef AMSS_OMP_DIRECT_SYNC
+    if (plan.direct_safe)
+    {
+        // Same-level source and destination arrays are disjoint, so the
+        // pack-before-unpack staging buffer is unnecessary for this plan.
+#pragma omp parallel if (plan.ops.size() > 1)
+        {
+#pragma omp for schedule(dynamic, 1)
+            for (int op_index = 0;
+                 op_index < static_cast<int>(plan.ops.size()); ++op_index)
+            {
+                OmpLocalTransferOp &op = plan.ops[op_index];
+                f_copy(
+                    DIM, op.dst->Bg->bbox, op.dst->Bg->bbox + dim,
+                    op.dst->Bg->shape, op.dst->Bg->fgfs[op.dst_var->sgfn],
+                    op.src->Bg->bbox, op.src->Bg->bbox + dim,
+                    op.src->Bg->shape, op.src->Bg->fgfs[op.src_var->sgfn],
+                    op.dst->llb, op.dst->uub);
+            }
+        }
+        return;
+    }
+#endif
+
     vector<double> &workspace = omp_transfer_workspace();
     if (workspace.size() < plan.total_size)
         workspace.resize(plan.total_size);
     double *data = workspace.data();
-    int DIM = dim;
 
 #pragma omp parallel if (plan.ops.size() > 1)
     {
