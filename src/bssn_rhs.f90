@@ -291,6 +291,88 @@
   endif
 
 ! second kind of connection
+#ifdef AMSS_ENABLE_RHS_CONNECTION_FUSION
+! These 18 pointwise connection components share the same inverse metric and
+! derivative inputs.  Keep each expression's arithmetic order, but load the
+! common inputs once per grid point instead of traversing the arrays 18 times.
+  do k=1,ex(3)
+  do j=1,ex(2)
+!$omp simd
+  do i=1,ex(1)
+    Gamxxx(i,j,k) = HALF*( gupxx(i,j,k)*gxxx(i,j,k) + &
+      gupxy(i,j,k)*(TWO*gxyx(i,j,k) - gxxy(i,j,k)) + &
+      gupxz(i,j,k)*(TWO*gxzx(i,j,k) - gxxz(i,j,k)) )
+    Gamyxx(i,j,k) = HALF*( gupxy(i,j,k)*gxxx(i,j,k) + &
+      gupyy(i,j,k)*(TWO*gxyx(i,j,k) - gxxy(i,j,k)) + &
+      gupyz(i,j,k)*(TWO*gxzx(i,j,k) - gxxz(i,j,k)) )
+    Gamzxx(i,j,k) = HALF*( gupxz(i,j,k)*gxxx(i,j,k) + &
+      gupyz(i,j,k)*(TWO*gxyx(i,j,k) - gxxy(i,j,k)) + &
+      gupzz(i,j,k)*(TWO*gxzx(i,j,k) - gxxz(i,j,k)) )
+  enddo
+  enddo
+  enddo
+
+  do k=1,ex(3)
+  do j=1,ex(2)
+!$omp simd
+  do i=1,ex(1)
+    Gamxyy(i,j,k) = HALF*( gupxx(i,j,k)*(TWO*gxyy(i,j,k) - gyyx(i,j,k)) + &
+      gupxy(i,j,k)*gyyy(i,j,k) + &
+      gupxz(i,j,k)*(TWO*gyzy(i,j,k) - gyyz(i,j,k)) )
+    Gamyyy(i,j,k) = HALF*( gupxy(i,j,k)*(TWO*gxyy(i,j,k) - gyyx(i,j,k)) + &
+      gupyy(i,j,k)*gyyy(i,j,k) + &
+      gupyz(i,j,k)*(TWO*gyzy(i,j,k) - gyyz(i,j,k)) )
+    Gamzyy(i,j,k) = HALF*( gupxz(i,j,k)*(TWO*gxyy(i,j,k) - gyyx(i,j,k)) + &
+      gupyz(i,j,k)*gyyy(i,j,k) + &
+      gupzz(i,j,k)*(TWO*gyzy(i,j,k) - gyyz(i,j,k)) )
+
+    Gamxzz(i,j,k) = HALF*( gupxx(i,j,k)*(TWO*gxzz(i,j,k) - gzzx(i,j,k)) + &
+      gupxy(i,j,k)*(TWO*gyzz(i,j,k) - gzzy(i,j,k)) + &
+      gupxz(i,j,k)*gzzz(i,j,k) )
+    Gamyzz(i,j,k) = HALF*( gupxy(i,j,k)*(TWO*gxzz(i,j,k) - gzzx(i,j,k)) + &
+      gupyy(i,j,k)*(TWO*gyzz(i,j,k) - gzzy(i,j,k)) + &
+      gupyz(i,j,k)*gzzz(i,j,k) )
+    Gamzzz(i,j,k) = HALF*( gupxz(i,j,k)*(TWO*gxzz(i,j,k) - gzzx(i,j,k)) + &
+      gupyz(i,j,k)*(TWO*gyzz(i,j,k) - gzzy(i,j,k)) + &
+      gupzz(i,j,k)*gzzz(i,j,k) )
+  enddo
+  enddo
+  enddo
+
+  do k=1,ex(3)
+  do j=1,ex(2)
+!$omp simd
+  do i=1,ex(1)
+    Gamxxy(i,j,k) = HALF*( gupxx(i,j,k)*gxxy(i,j,k) + &
+      gupxy(i,j,k)*gyyx(i,j,k) + &
+      gupxz(i,j,k)*(gxzy(i,j,k) + gyzx(i,j,k) - gxyz(i,j,k)) )
+    Gamyxy(i,j,k) = HALF*( gupxy(i,j,k)*gxxy(i,j,k) + &
+      gupyy(i,j,k)*gyyx(i,j,k) + &
+      gupyz(i,j,k)*(gxzy(i,j,k) + gyzx(i,j,k) - gxyz(i,j,k)) )
+    Gamzxy(i,j,k) = HALF*( gupxz(i,j,k)*gxxy(i,j,k) + &
+      gupyz(i,j,k)*gyyx(i,j,k) + &
+      gupzz(i,j,k)*(gxzy(i,j,k) + gyzx(i,j,k) - gxyz(i,j,k)) )
+
+    Gamxxz(i,j,k) = HALF*( gupxx(i,j,k)*gxxz(i,j,k) + &
+      gupxy(i,j,k)*(gxyz(i,j,k) + gyzx(i,j,k) - gxzy(i,j,k)) + &
+      gupxz(i,j,k)*gzzx(i,j,k) )
+    Gamyxz(i,j,k) = HALF*( gupxy(i,j,k)*gxxz(i,j,k) + &
+      gupyy(i,j,k)*(gxyz(i,j,k) + gyzx(i,j,k) - gxzy(i,j,k)) + &
+      gupyz(i,j,k)*gzzx(i,j,k) )
+    Gamzxz(i,j,k) = HALF*( gupxz(i,j,k)*gxxz(i,j,k) + &
+      gupyz(i,j,k)*(gxyz(i,j,k) + gyzx(i,j,k) - gxzy(i,j,k)) + &
+      gupzz(i,j,k)*gzzx(i,j,k) )
+
+    Gamxyz(i,j,k) = HALF*( gupxx(i,j,k)*(gxyz(i,j,k) + gxzy(i,j,k) - gyzx(i,j,k)) + &
+      gupxy(i,j,k)*gyyz(i,j,k) + gupxz(i,j,k)*gzzy(i,j,k) )
+    Gamyyz(i,j,k) = HALF*( gupxy(i,j,k)*(gxyz(i,j,k) + gxzy(i,j,k) - gyzx(i,j,k)) + &
+      gupyy(i,j,k)*gyyz(i,j,k) + gupyz(i,j,k)*gzzy(i,j,k) )
+    Gamzyz(i,j,k) = HALF*( gupxz(i,j,k)*(gxyz(i,j,k) + gxzy(i,j,k) - gyzx(i,j,k)) + &
+      gupyz(i,j,k)*gyyz(i,j,k) + gupzz(i,j,k)*gzzy(i,j,k) )
+  enddo
+  enddo
+  enddo
+#else
   Gamxxx =HALF*( gupxx*gxxx + gupxy*(TWO*gxyx - gxxy ) + gupxz*(TWO*gxzx - gxxz ))
   Gamyxx =HALF*( gupxy*gxxx + gupyy*(TWO*gxyx - gxxy ) + gupyz*(TWO*gxzx - gxxz ))
   Gamzxx =HALF*( gupxz*gxxx + gupyz*(TWO*gxyx - gxxy ) + gupzz*(TWO*gxzx - gxxz ))
@@ -314,6 +396,7 @@
   Gamxyz =HALF*( gupxx*( gxyz + gxzy - gyzx ) + gupxy*gyyz + gupxz*gzzy )
   Gamyyz =HALF*( gupxy*( gxyz + gxzy - gyzx ) + gupyy*gyyz + gupyz*gzzy )
   Gamzyz =HALF*( gupxz*( gxyz + gxzy - gyzx ) + gupyz*gyyz + gupzz*gzzy )
+#endif
 ! Raise indices of \tilde A_{ij} and store in R_ij
 
   Rxx =    gupxx * gupxx * Axx + gupxy * gupxy * Ayy + gupxz * gupxz * Azz + &
