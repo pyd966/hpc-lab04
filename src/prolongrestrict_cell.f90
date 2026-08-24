@@ -2021,10 +2021,17 @@
   endif
 
   call symmetry_bd(3,extc,func,funcc,SoA)
+
      
 !~~~~~~> prolongation start...
   do k = kmino,kmaxo
    do j = jmino,jmaxo
+#ifdef AMSS_PROLONG3_SIMD
+! The temporary interpolation planes are private to each SIMD lane.  The
+! directive is opt-in because the odd/even coarse-grid map can make gathers
+! cheaper than SIMD on some block shapes and architectures.
+!$omp simd private(tmp1,tmp2,cxI,ii,jj,kk)
+#endif
     do i = imino,imaxo
        cxI(1) = i
        cxI(2) = j
