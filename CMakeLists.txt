@@ -25,7 +25,7 @@ option(AMSS_ENABLE_LOPSIDEDIFF_SIMD "Vectorize the CPU ABE regular lopsidediff i
 option(AMSS_ENABLE_LOPSIDEDIFF_GHOST_ONLY "Avoid full lopsided ghost copies in the deep interior" OFF)
 option(AMSS_ENABLE_SYMMETRY_BD_NO_CLEAR "Skip redundant full ghost-array zeroing in symmetry_bd" ON)
 option(AMSS_ENABLE_PROLONG3_SIMD "Add an explicit SIMD directive to the cell prolong3 loop" OFF)
-option(AMSS_ENABLE_PROLONG3_PAIRWISE "Reuse the coarse interpolation for adjacent prolong3 fine points" OFF)
+option(AMSS_ENABLE_PROLONG3_PAIRWISE "Reuse the coarse interpolation for adjacent prolong3 fine points" ON)
 option(AMSS_ENABLE_LOPSIDEDIFF_BATCH "Batch pairs of lopsided advection fields" OFF)
 option(AMSS_ENABLE_RHS_METRIC_FUSION "Fuse the CPU ABE metric initialization and RHS passes" ON)
 option(AMSS_ENABLE_RHS_GAMMA_FUSION "Fuse the CPU ABE Gamma RHS passes" ON)
