@@ -900,9 +900,42 @@
   call fdderivs(ex,Lap,fxx,fxy,fxz,fyy,fyz,fzz,X,Y,Z, &
                 SYM,SYM,SYM,symmetry,Lev)
 
+#ifdef AMSS_ENABLE_RHS_FIRST_CONNECTION_FUSION
+! These three independent arrays used to be assigned by three full-grid
+! array-expression passes. Keep the same arithmetic while traversing i once.
+  do k=1,ex(3)
+  do j=1,ex(2)
+!$omp simd
+  do i=1,ex(1)
+    gxxx(i,j,k) = (gupxx(i,j,k) * chix(i,j,k) + gupxy(i,j,k) * chiy(i,j,k) + &
+                   gupxz(i,j,k) * chiz(i,j,k))/chin1(i,j,k)
+    gxxy(i,j,k) = (gupxy(i,j,k) * chix(i,j,k) + gupyy(i,j,k) * chiy(i,j,k) + &
+                   gupyz(i,j,k) * chiz(i,j,k))/chin1(i,j,k)
+    gxxz(i,j,k) = (gupxz(i,j,k) * chix(i,j,k) + gupyz(i,j,k) * chiy(i,j,k) + &
+                   gupzz(i,j,k) * chiz(i,j,k))/chin1(i,j,k)
+  enddo
+  enddo
+  enddo
+#elif defined(AMSS_ENABLE_RHS_FIRST_CONNECTION_PAIR_FUSION)
+! A smaller variant keeps gxxz in the compiler's original array-expression
+! path, reducing the number of simultaneous output streams in the loop.
+  do k=1,ex(3)
+  do j=1,ex(2)
+!$omp simd
+  do i=1,ex(1)
+    gxxx(i,j,k) = (gupxx(i,j,k) * chix(i,j,k) + gupxy(i,j,k) * chiy(i,j,k) + &
+                   gupxz(i,j,k) * chiz(i,j,k))/chin1(i,j,k)
+    gxxy(i,j,k) = (gupxy(i,j,k) * chix(i,j,k) + gupyy(i,j,k) * chiy(i,j,k) + &
+                   gupyz(i,j,k) * chiz(i,j,k))/chin1(i,j,k)
+  enddo
+  enddo
+  enddo
+  gxxz = (gupxz * chix + gupyz * chiy + gupzz * chiz)/chin1
+#else
   gxxx = (gupxx * chix + gupxy * chiy + gupxz * chiz)/chin1
   gxxy = (gupxy * chix + gupyy * chiy + gupyz * chiz)/chin1
   gxxz = (gupxz * chix + gupyz * chiy + gupzz * chiz)/chin1
+#endif
 ! now get physical second kind of connection
   Gamxxx = Gamxxx - ( (chix + chix)/chin1 - gxx * gxxx )*HALF
   Gamyxx = Gamyxx - (                     - gxx * gxxy )*HALF
