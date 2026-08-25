@@ -88,5 +88,23 @@ one pointwise array pass inside `compute_rhs_bssn`; the post-commit profile will
 verify that the flat RHS share and copy path remain stable under the default
 configuration.
 
+## Post-commit profile
+
+The default configuration was profiled by job `161466` at commit `bdb811a`.
+The `perf stat` pass completed successfully:
+
+- Evolve `t=0..4`: **29.138 s**; total run: **30.9344 s**;
+- average CPU utilization: **24.063 / 30**;
+- IPC **1.39**, branch miss **0.50%**, L1D miss **4.19%**;
+- LLC load miss **49.60%**, dTLB miss **1.44%**;
+- the independent course check passed (`Trajectory RMS = 0`).
+
+The job's second `perf record` pass could not finalize `perf.data` because the
+home filesystem reached 97% usage (`No space left on device`). Its partial data
+is not used as a hotspot profile. The last valid flat profile remains job
+`160888` (RHS 51.05%, memcpy 9.68%, lopsided 8.83%); the post-commit counters
+show no new cache or branch anomaly. A future full call-graph rerun should use
+a low-frequency record or a scratch output directory after storage is cleaned.
+
 Artifacts: `profile/abe-rhs-first-connection-20260825T045813Z-14` and
 `profile/abe-rhs-first-connection-20260825T045027Z-15`.
