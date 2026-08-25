@@ -1205,60 +1205,79 @@ __global__ void rhs_advection_kernel(RHS_KERNEL_PARAMS) {
     if (i >= ex0 || j >= ex1 || k >= ex2) return;
     const int idx = IDX3D(i, j, k, ex0, ex1, ex2);
     const int dims[3] = {ex0, ex1, ex2};
+    const double dX = X[1] - X[0];
+    const double dY = Y[1] - Y[0];
+    const double dZ = Z[1] - Z[0];
+    const double d12dx = 1.0 / (12.0 * dX);
+    const double d12dy = 1.0 / (12.0 * dY);
+    const double d12dz = 1.0 / (12.0 * dZ);
+    const int imax = ex0 - 1, jmax = ex1 - 1, kmax = ex2 - 1;
+    int imin = 0, jmin = 0, kmin = 0;
+    if (symmetry > 0 && fabs(Z[0]) < dZ) kmin = -3;
+    if (symmetry > 1 && fabs(X[0]) < dX) imin = -3;
+    if (symmetry > 1 && fabs(Y[0]) < dY) jmin = -3;
+    const double vx = betax[idx], vy = betay[idx], vz = betaz[idx];
+
+#define RHS_ADVECTION_LOPSIDED(field, s1, s2, s3) \
+    d_lopsided_point(dims, field, vx, vy, vz, d12dx, d12dy, d12dz, \
+                     imin, jmin, kmin, imax, jmax, kmax, symmetry, \
+                     s1, s2, s3, i, j, k)
 
     // Metric variables.
-    gxx_rhs[idx] += d_lopsided_point(dims, dxx, gxx_rhs, betax, betay, betaz, X, Y, Z, symmetry, SYM, SYM, SYM, i, j, k);
+    gxx_rhs[idx] += RHS_ADVECTION_LOPSIDED(dxx, SYM, SYM, SYM);
     if (eps > 0.0) gxx_rhs[idx] += d_kodis_point(dims, dxx, X, Y, Z, SYM, SYM, SYM, symmetry, eps, i, j, k);
-    gxy_rhs[idx] += d_lopsided_point(dims, gxy, gxy_rhs, betax, betay, betaz, X, Y, Z, symmetry, ANTI, ANTI, SYM, i, j, k);
+    gxy_rhs[idx] += RHS_ADVECTION_LOPSIDED(gxy, ANTI, ANTI, SYM);
     if (eps > 0.0) gxy_rhs[idx] += d_kodis_point(dims, gxy, X, Y, Z, ANTI, ANTI, SYM, symmetry, eps, i, j, k);
-    gxz_rhs[idx] += d_lopsided_point(dims, gxz, gxz_rhs, betax, betay, betaz, X, Y, Z, symmetry, ANTI, SYM, ANTI, i, j, k);
+    gxz_rhs[idx] += RHS_ADVECTION_LOPSIDED(gxz, ANTI, SYM, ANTI);
     if (eps > 0.0) gxz_rhs[idx] += d_kodis_point(dims, gxz, X, Y, Z, ANTI, SYM, ANTI, symmetry, eps, i, j, k);
-    gyy_rhs[idx] += d_lopsided_point(dims, dyy, gyy_rhs, betax, betay, betaz, X, Y, Z, symmetry, SYM, SYM, SYM, i, j, k);
+    gyy_rhs[idx] += RHS_ADVECTION_LOPSIDED(dyy, SYM, SYM, SYM);
     if (eps > 0.0) gyy_rhs[idx] += d_kodis_point(dims, dyy, X, Y, Z, SYM, SYM, SYM, symmetry, eps, i, j, k);
-    gyz_rhs[idx] += d_lopsided_point(dims, gyz, gyz_rhs, betax, betay, betaz, X, Y, Z, symmetry, SYM, ANTI, ANTI, i, j, k);
+    gyz_rhs[idx] += RHS_ADVECTION_LOPSIDED(gyz, SYM, ANTI, ANTI);
     if (eps > 0.0) gyz_rhs[idx] += d_kodis_point(dims, gyz, X, Y, Z, SYM, ANTI, ANTI, symmetry, eps, i, j, k);
-    gzz_rhs[idx] += d_lopsided_point(dims, dzz, gzz_rhs, betax, betay, betaz, X, Y, Z, symmetry, SYM, SYM, SYM, i, j, k);
+    gzz_rhs[idx] += RHS_ADVECTION_LOPSIDED(dzz, SYM, SYM, SYM);
     if (eps > 0.0) gzz_rhs[idx] += d_kodis_point(dims, dzz, X, Y, Z, SYM, SYM, SYM, symmetry, eps, i, j, k);
 
     // Extrinsic curvature.
-    Axx_rhs[idx] += d_lopsided_point(dims, Axx, Axx_rhs, betax, betay, betaz, X, Y, Z, symmetry, SYM, SYM, SYM, i, j, k);
+    Axx_rhs[idx] += RHS_ADVECTION_LOPSIDED(Axx, SYM, SYM, SYM);
     if (eps > 0.0) Axx_rhs[idx] += d_kodis_point(dims, Axx, X, Y, Z, SYM, SYM, SYM, symmetry, eps, i, j, k);
-    Axy_rhs[idx] += d_lopsided_point(dims, Axy, Axy_rhs, betax, betay, betaz, X, Y, Z, symmetry, ANTI, ANTI, SYM, i, j, k);
+    Axy_rhs[idx] += RHS_ADVECTION_LOPSIDED(Axy, ANTI, ANTI, SYM);
     if (eps > 0.0) Axy_rhs[idx] += d_kodis_point(dims, Axy, X, Y, Z, ANTI, ANTI, SYM, symmetry, eps, i, j, k);
-    Axz_rhs[idx] += d_lopsided_point(dims, Axz, Axz_rhs, betax, betay, betaz, X, Y, Z, symmetry, ANTI, SYM, ANTI, i, j, k);
+    Axz_rhs[idx] += RHS_ADVECTION_LOPSIDED(Axz, ANTI, SYM, ANTI);
     if (eps > 0.0) Axz_rhs[idx] += d_kodis_point(dims, Axz, X, Y, Z, ANTI, SYM, ANTI, symmetry, eps, i, j, k);
-    Ayy_rhs[idx] += d_lopsided_point(dims, Ayy, Ayy_rhs, betax, betay, betaz, X, Y, Z, symmetry, SYM, SYM, SYM, i, j, k);
+    Ayy_rhs[idx] += RHS_ADVECTION_LOPSIDED(Ayy, SYM, SYM, SYM);
     if (eps > 0.0) Ayy_rhs[idx] += d_kodis_point(dims, Ayy, X, Y, Z, SYM, SYM, SYM, symmetry, eps, i, j, k);
-    Ayz_rhs[idx] += d_lopsided_point(dims, Ayz, Ayz_rhs, betax, betay, betaz, X, Y, Z, symmetry, SYM, ANTI, ANTI, i, j, k);
+    Ayz_rhs[idx] += RHS_ADVECTION_LOPSIDED(Ayz, SYM, ANTI, ANTI);
     if (eps > 0.0) Ayz_rhs[idx] += d_kodis_point(dims, Ayz, X, Y, Z, SYM, ANTI, ANTI, symmetry, eps, i, j, k);
-    Azz_rhs[idx] += d_lopsided_point(dims, Azz, Azz_rhs, betax, betay, betaz, X, Y, Z, symmetry, SYM, SYM, SYM, i, j, k);
+    Azz_rhs[idx] += RHS_ADVECTION_LOPSIDED(Azz, SYM, SYM, SYM);
     if (eps > 0.0) Azz_rhs[idx] += d_kodis_point(dims, Azz, X, Y, Z, SYM, SYM, SYM, symmetry, eps, i, j, k);
 
     // Scalar and gauge variables.
-    chi_rhs[idx] += d_lopsided_point(dims, chi, chi_rhs, betax, betay, betaz, X, Y, Z, symmetry, SYM, SYM, SYM, i, j, k);
+    chi_rhs[idx] += RHS_ADVECTION_LOPSIDED(chi, SYM, SYM, SYM);
     if (eps > 0.0) chi_rhs[idx] += d_kodis_point(dims, chi, X, Y, Z, SYM, SYM, SYM, symmetry, eps, i, j, k);
-    trK_rhs[idx] += d_lopsided_point(dims, trK, trK_rhs, betax, betay, betaz, X, Y, Z, symmetry, SYM, SYM, SYM, i, j, k);
+    trK_rhs[idx] += RHS_ADVECTION_LOPSIDED(trK, SYM, SYM, SYM);
     if (eps > 0.0) trK_rhs[idx] += d_kodis_point(dims, trK, X, Y, Z, SYM, SYM, SYM, symmetry, eps, i, j, k);
-    Gamx_rhs[idx] += d_lopsided_point(dims, Gamx, Gamx_rhs, betax, betay, betaz, X, Y, Z, symmetry, ANTI, SYM, SYM, i, j, k);
+    Gamx_rhs[idx] += RHS_ADVECTION_LOPSIDED(Gamx, ANTI, SYM, SYM);
     if (eps > 0.0) Gamx_rhs[idx] += d_kodis_point(dims, Gamx, X, Y, Z, ANTI, SYM, SYM, symmetry, eps, i, j, k);
-    Gamy_rhs[idx] += d_lopsided_point(dims, Gamy, Gamy_rhs, betax, betay, betaz, X, Y, Z, symmetry, SYM, ANTI, SYM, i, j, k);
+    Gamy_rhs[idx] += RHS_ADVECTION_LOPSIDED(Gamy, SYM, ANTI, SYM);
     if (eps > 0.0) Gamy_rhs[idx] += d_kodis_point(dims, Gamy, X, Y, Z, SYM, ANTI, SYM, symmetry, eps, i, j, k);
-    Gamz_rhs[idx] += d_lopsided_point(dims, Gamz, Gamz_rhs, betax, betay, betaz, X, Y, Z, symmetry, SYM, SYM, ANTI, i, j, k);
+    Gamz_rhs[idx] += RHS_ADVECTION_LOPSIDED(Gamz, SYM, SYM, ANTI);
     if (eps > 0.0) Gamz_rhs[idx] += d_kodis_point(dims, Gamz, X, Y, Z, SYM, SYM, ANTI, symmetry, eps, i, j, k);
-    Lap_rhs[idx] += d_lopsided_point(dims, Lap, Lap_rhs, betax, betay, betaz, X, Y, Z, symmetry, SYM, SYM, SYM, i, j, k);
+    Lap_rhs[idx] += RHS_ADVECTION_LOPSIDED(Lap, SYM, SYM, SYM);
     if (eps > 0.0) Lap_rhs[idx] += d_kodis_point(dims, Lap, X, Y, Z, SYM, SYM, SYM, symmetry, eps, i, j, k);
-    betax_rhs[idx] += d_lopsided_point(dims, betax, betax_rhs, betax, betay, betaz, X, Y, Z, symmetry, ANTI, SYM, SYM, i, j, k);
+    betax_rhs[idx] += RHS_ADVECTION_LOPSIDED(betax, ANTI, SYM, SYM);
     if (eps > 0.0) betax_rhs[idx] += d_kodis_point(dims, betax, X, Y, Z, ANTI, SYM, SYM, symmetry, eps, i, j, k);
-    betay_rhs[idx] += d_lopsided_point(dims, betay, betay_rhs, betax, betay, betaz, X, Y, Z, symmetry, SYM, ANTI, SYM, i, j, k);
+    betay_rhs[idx] += RHS_ADVECTION_LOPSIDED(betay, SYM, ANTI, SYM);
     if (eps > 0.0) betay_rhs[idx] += d_kodis_point(dims, betay, X, Y, Z, SYM, ANTI, SYM, symmetry, eps, i, j, k);
-    betaz_rhs[idx] += d_lopsided_point(dims, betaz, betaz_rhs, betax, betay, betaz, X, Y, Z, symmetry, SYM, SYM, ANTI, i, j, k);
+    betaz_rhs[idx] += RHS_ADVECTION_LOPSIDED(betaz, SYM, SYM, ANTI);
     if (eps > 0.0) betaz_rhs[idx] += d_kodis_point(dims, betaz, X, Y, Z, SYM, SYM, ANTI, symmetry, eps, i, j, k);
-    dtSfx_rhs[idx] += d_lopsided_point(dims, dtSfx, dtSfx_rhs, betax, betay, betaz, X, Y, Z, symmetry, ANTI, SYM, SYM, i, j, k);
+    dtSfx_rhs[idx] += RHS_ADVECTION_LOPSIDED(dtSfx, ANTI, SYM, SYM);
     if (eps > 0.0) dtSfx_rhs[idx] += d_kodis_point(dims, dtSfx, X, Y, Z, ANTI, SYM, SYM, symmetry, eps, i, j, k);
-    dtSfy_rhs[idx] += d_lopsided_point(dims, dtSfy, dtSfy_rhs, betax, betay, betaz, X, Y, Z, symmetry, SYM, ANTI, SYM, i, j, k);
+    dtSfy_rhs[idx] += RHS_ADVECTION_LOPSIDED(dtSfy, SYM, ANTI, SYM);
     if (eps > 0.0) dtSfy_rhs[idx] += d_kodis_point(dims, dtSfy, X, Y, Z, SYM, ANTI, SYM, symmetry, eps, i, j, k);
-    dtSfz_rhs[idx] += d_lopsided_point(dims, dtSfz, dtSfz_rhs, betax, betay, betaz, X, Y, Z, symmetry, SYM, SYM, ANTI, i, j, k);
+    dtSfz_rhs[idx] += RHS_ADVECTION_LOPSIDED(dtSfz, SYM, SYM, ANTI);
     if (eps > 0.0) dtSfz_rhs[idx] += d_kodis_point(dims, dtSfz, X, Y, Z, SYM, SYM, ANTI, symmetry, eps, i, j, k);
+
+#undef RHS_ADVECTION_LOPSIDED
 }
 // Constraints are evaluated only for the predictor stage. The kernel rebuilds
 // the conformal connection needed by the Gamma residual, then consumes the
