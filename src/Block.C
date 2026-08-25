@@ -45,6 +45,7 @@ Block::Block(int DIM, int *shapei, double *bboxi, int ranki, int ingfsi, int fng
 		cout << "belong to level " << lev << endl;
 		MPI_Abort(MPI_COMM_WORLD, 1);
 	}
+	fgfs_storage = 0;
 
 	if (myrank == rank)
 	{
@@ -70,7 +71,24 @@ Block::Block(int DIM, int *shapei, double *bboxi, int ranki, int ingfsi, int fng
 		gpu_valid = new bool[fngfs];
 #endif
 
+		#ifdef AMSS_ENABLE_BLOCK_FIELD_ARENA
+		const size_t field_bytes = sizeof(double) * static_cast<size_t>(nn) * static_cast<size_t>(fngfs);
+		fgfs_storage = (double *)malloc(field_bytes);
+		if (!(fgfs_storage))
+		{
+			cout << "on node#" << rank << ", out of memory when constructing Block." << endl;
+			MPI_Abort(MPI_COMM_WORLD, 1);
+		}
+		memset(fgfs_storage, 0, field_bytes);
+		#ifdef AMSS_ENABLE_HUGEPAGE_HINT
+		// A single range gives THP a chance to promote complete 2 MiB pages.
+		(void)madvise(fgfs_storage, field_bytes, MADV_HUGEPAGE);
+		#endif
+		#endif
 		for (int i = 0; i < fngfs; i++) {
+			#ifdef AMSS_ENABLE_BLOCK_FIELD_ARENA
+			fgfs[i] = fgfs_storage + static_cast<size_t>(i) * static_cast<size_t>(nn);
+			#else
 			fgfs[i] = (double *)malloc(sizeof(double) * nn);
 			if (!(fgfs[i]))
 			{
@@ -78,10 +96,13 @@ Block::Block(int DIM, int *shapei, double *bboxi, int ranki, int ingfsi, int fng
 				MPI_Abort(MPI_COMM_WORLD, 1);
 			}
 			memset(fgfs[i], 0, sizeof(double) * nn);
+			#endif
 #ifdef AMSS_ENABLE_HUGEPAGE_HINT
+			#ifndef AMSS_ENABLE_BLOCK_FIELD_ARENA
 			// Keep the persistent field allocation unchanged; this is only a
 			// Linux THP hint and may be ignored when THP is unavailable.
 			(void)madvise(fgfs[i], sizeof(double) * nn, MADV_HUGEPAGE);
+			#endif
 #endif
 
 #ifdef USE_GPU
@@ -125,11 +146,16 @@ Block::~Block()
 			free(igfs[i]);
 		delete[] igfs;
 		for (int i = 0; i < fngfs; i ++) {
+			#ifndef AMSS_ENABLE_BLOCK_FIELD_ARENA
 			free(fgfs[i]);
+			#endif
 #ifdef USE_GPU
 			GPUManager::getInstance().free_device_memory(d_fgfs[i], nn);
 #endif
 		}
+		#ifdef AMSS_ENABLE_BLOCK_FIELD_ARENA
+		free(fgfs_storage);
+		#endif
 		delete[] fgfs;
 #ifdef USE_GPU
 		delete[] d_fgfs;

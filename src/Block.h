@@ -23,6 +23,7 @@ public:
    int ingfs, fngfs;
    int *(*igfs);
    double *(*fgfs); // fine grid functions
+   double *fgfs_storage; // owner allocation when block-field arena is enabled
 
 #ifdef USE_GPU
    // GPU Shadow pointers and valid flags
