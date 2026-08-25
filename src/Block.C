@@ -6,6 +6,9 @@
 #include <string>
 #include <cmath>
 #include <new>
+#ifdef AMSS_ENABLE_HUGEPAGE_HINT
+#include <sys/mman.h>
+#endif
 using namespace std;
 
 #include "Block.h"
@@ -75,6 +78,11 @@ Block::Block(int DIM, int *shapei, double *bboxi, int ranki, int ingfsi, int fng
 				MPI_Abort(MPI_COMM_WORLD, 1);
 			}
 			memset(fgfs[i], 0, sizeof(double) * nn);
+#ifdef AMSS_ENABLE_HUGEPAGE_HINT
+			// Keep the persistent field allocation unchanged; this is only a
+			// Linux THP hint and may be ignored when THP is unavailable.
+			(void)madvise(fgfs[i], sizeof(double) * nn, MADV_HUGEPAGE);
+#endif
 
 #ifdef USE_GPU
 			d_fgfs[i] = GPUManager::getInstance().allocate_device_memory(nn);
