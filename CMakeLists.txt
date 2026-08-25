@@ -19,7 +19,7 @@ option(AMSS_ENABLE_FDERIVS_BOUNDARY_INIT "Zero only uncovered fderivs boundary p
 option(AMSS_ENABLE_FDERIVS_BATCH "Batch pairs of regular fderivs fields" OFF)
 option(AMSS_ENABLE_FDDERIVS_SIMD "Vectorize the CPU ABE regular fdderivs interior loop" ON)
 option(AMSS_ENABLE_FDDERIVS_BOUNDARY_INIT "Zero only uncovered fdderivs boundary planes" OFF)
-option(AMSS_ENABLE_OMP_DIRECT_SYNC "Bypass the pack workspace for provably disjoint same-level Sync transfers" OFF)
+option(AMSS_ENABLE_OMP_DIRECT_SYNC "Bypass the pack workspace for provably disjoint same-level Sync transfers" ON)
 option(AMSS_ENABLE_OMP_DIRECT_AMR_TRANSFER "Write non-mixed prolong/restrict results directly to their destination arrays" OFF)
 option(AMSS_ENABLE_OMP_DIRECT_AMR_SPLIT "Split non-overlapping direct AMR target regions into separate OpenMP tasks" OFF)
 option(AMSS_ENABLE_LOPSIDEDIFF_SIMD "Vectorize the CPU ABE regular lopsidediff interior loop" ON)
