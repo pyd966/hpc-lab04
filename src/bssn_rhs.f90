@@ -87,6 +87,9 @@
   real*8            :: dX, dY, dZ, PI
   real*8            :: txx, txy, txz, tyy, tyz, tzz, fval
   integer :: i, j, k
+#ifdef AMSS_ENABLE_RHS_RICCI_TILING
+  integer :: jb, jend
+#endif
   real*8, parameter :: ZEO = 0.d0,ONE = 1.D0, TWO = 2.D0, FOUR = 4.D0
   real*8, parameter :: EIGHT = 8.D0, HALF = 0.5D0, THR = 3.d0
   real*8, parameter :: SYM = 1.D0, ANTI= - 1.D0
@@ -626,6 +629,9 @@
    Ryz =   gupxx * fxx + gupyy * fyy + gupzz * fzz + &
          ( gupxy * fxy + gupxz * fxz + gupyz * fyz ) * TWO
 
+#ifdef AMSS_ENABLE_RHS_RICCI_TILING
+#include "bssn_ricci_tiled.inc"
+#else
   Rxx =     - HALF * Rxx                                   + &
                gxx * Gamxx+ gxy * Gamyx   +    gxz * Gamzx + &
              Gamxa * gxxx +  Gamya * gxyx +  Gamza * gxzx  + &
@@ -826,6 +832,7 @@
             Gamxyz * gxzz + Gamyyz * gyzz + Gamzyz * gzzz  + &
             Gamxzz * gxzy + Gamyzz * gyzy + Gamzzz * gzzy  + &
             Gamxyz * gzzx + Gamyyz * gzzy + Gamzyz * gzzz )
+#endif
 !covariant second derivative of chi respect to tilted metric
   call fdderivs(ex,chi,fxx,fxy,fxz,fyy,fyz,fzz,X,Y,Z,SYM,SYM,SYM,Symmetry,Lev)
 
