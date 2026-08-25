@@ -85,6 +85,7 @@
 
   real*8,dimension(3) ::SSS,AAS,ASA,SAA,ASS,SAS,SSA
   real*8            :: dX, dY, dZ, PI
+  real*8            :: txx, txy, txz, tyy, tyz, tzz, fval
   integer :: i, j, k
   real*8, parameter :: ZEO = 0.d0,ONE = 1.D0, TWO = 2.D0, FOUR = 4.D0
   real*8, parameter :: EIGHT = 8.D0, HALF = 0.5D0, THR = 3.d0
@@ -828,6 +829,49 @@
 !covariant second derivative of chi respect to tilted metric
   call fdderivs(ex,chi,fxx,fxy,fxz,fyy,fyz,fzz,X,Y,Z,SYM,SYM,SYM,Symmetry,Lev)
 
+#ifdef AMSS_ENABLE_RHS_CHI_RICCI_FUSION
+! fxx..fzz are dead after the six Ricci updates and are overwritten by the
+! next fdderivs(Lap,...) call.  Keep the corrected values in SIMD-private
+! scalars and avoid seven full-array stores and reloads.
+  do k=1,ex(3)
+  do j=1,ex(2)
+!$omp simd private(txx,txy,txz,tyy,tyz,tzz,fval)
+  do i=1,ex(1)
+    txx = fxx(i,j,k) - Gamxxx(i,j,k)*chix(i,j,k) - &
+      Gamyxx(i,j,k)*chiy(i,j,k) - Gamzxx(i,j,k)*chiz(i,j,k)
+    txy = fxy(i,j,k) - Gamxxy(i,j,k)*chix(i,j,k) - &
+      Gamyxy(i,j,k)*chiy(i,j,k) - Gamzxy(i,j,k)*chiz(i,j,k)
+    txz = fxz(i,j,k) - Gamxxz(i,j,k)*chix(i,j,k) - &
+      Gamyxz(i,j,k)*chiy(i,j,k) - Gamzxz(i,j,k)*chiz(i,j,k)
+    tyy = fyy(i,j,k) - Gamxyy(i,j,k)*chix(i,j,k) - &
+      Gamyyy(i,j,k)*chiy(i,j,k) - Gamzyy(i,j,k)*chiz(i,j,k)
+    tyz = fyz(i,j,k) - Gamxyz(i,j,k)*chix(i,j,k) - &
+      Gamyyz(i,j,k)*chiy(i,j,k) - Gamzyz(i,j,k)*chiz(i,j,k)
+    tzz = fzz(i,j,k) - Gamxzz(i,j,k)*chix(i,j,k) - &
+      Gamyzz(i,j,k)*chiy(i,j,k) - Gamzzz(i,j,k)*chiz(i,j,k)
+    fval = gupxx(i,j,k)*(txx - F3o2/chin1(i,j,k)*chix(i,j,k)*chix(i,j,k)) + &
+      gupyy(i,j,k)*(tyy - F3o2/chin1(i,j,k)*chiy(i,j,k)*chiy(i,j,k)) + &
+      gupzz(i,j,k)*(tzz - F3o2/chin1(i,j,k)*chiz(i,j,k)*chiz(i,j,k)) + &
+      TWO*gupxy(i,j,k)*(txy - F3o2/chin1(i,j,k)*chix(i,j,k)*chiy(i,j,k)) + &
+      TWO*gupxz(i,j,k)*(txz - F3o2/chin1(i,j,k)*chix(i,j,k)*chiz(i,j,k)) + &
+      TWO*gupyz(i,j,k)*(tyz - F3o2/chin1(i,j,k)*chiy(i,j,k)*chiz(i,j,k))
+    fxx(i,j,k) = txx
+    fxy(i,j,k) = txy
+    fxz(i,j,k) = txz
+    fyy(i,j,k) = tyy
+    fyz(i,j,k) = tyz
+    fzz(i,j,k) = tzz
+    f(i,j,k) = fval
+  enddo
+  enddo
+  enddo
+  Rxx = Rxx + (fxx - chix*chix/chin1/TWO + gxx * f)/chin1/TWO
+  Ryy = Ryy + (fyy - chiy*chiy/chin1/TWO + gyy * f)/chin1/TWO
+  Rzz = Rzz + (fzz - chiz*chiz/chin1/TWO + gzz * f)/chin1/TWO
+  Rxy = Rxy + (fxy - chix*chiy/chin1/TWO + gxy * f)/chin1/TWO
+  Rxz = Rxz + (fxz - chix*chiz/chin1/TWO + gxz * f)/chin1/TWO
+  Ryz = Ryz + (fyz - chiy*chiz/chin1/TWO + gyz * f)/chin1/TWO
+#else
   fxx = fxx - Gamxxx * chix - Gamyxx * chiy - Gamzxx * chiz
   fxy = fxy - Gamxxy * chix - Gamyxy * chiy - Gamzxy * chiz
   fxz = fxz - Gamxxz * chix - Gamyxz * chiy - Gamzxz * chiz
@@ -850,6 +894,7 @@
   Rxy = Rxy + (fxy - chix*chiy/chin1/TWO + gxy * f)/chin1/TWO
   Rxz = Rxz + (fxz - chix*chiz/chin1/TWO + gxz * f)/chin1/TWO
   Ryz = Ryz + (fyz - chiy*chiz/chin1/TWO + gyz * f)/chin1/TWO
+#endif
 
 ! covariant second derivatives of the lapse respect to physical metric
   call fdderivs(ex,Lap,fxx,fxy,fxz,fyy,fyz,fzz,X,Y,Z, &
