@@ -79,6 +79,12 @@ void GPUManager::synchronize_all() {
     CUDA_CHECK(cudaDeviceSynchronize());
 }
 
+void GPUManager::synchronize_streams(const cudaStream_t* streams, std::size_t count) {
+    for (std::size_t i = 0; i < count; ++i) {
+        CUDA_CHECK(cudaStreamSynchronize(streams[i]));
+    }
+}
+
 void GPUManager::sync_to_gpu(const double* h_ptr, double* d_ptr, size_t num_elements) {
     CUDA_CHECK(cudaMemcpy(d_ptr, h_ptr, num_elements * sizeof(double), cudaMemcpyHostToDevice));
 }

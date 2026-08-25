@@ -169,13 +169,18 @@ void bssn_class::Step_GPU(int lev, int YN) {
 		}
 		Pp = Pp->next;
 	}
-	GPUManager::getInstance().synchronize_all();
+	// The first consumer is Parallel::Sync_GPU.  Its pack/unpack path waits
+	// only on the source/destination streams that carry ghost data; kernels
+	// for blocks without a transfer remain ordered by their own stream.
 	// check error information
 	{
 		int erh = ERROR;
 		MPI_Allreduce(&erh, &ERROR, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
 	}
 	if (ERROR) {
+		// Preserve the diagnostic path: a host error still requires all
+		// producers to finish before dumping device-backed state.
+		GPUManager::getInstance().synchronize_all();
 		Parallel::Dump_Data(GH->PatL[lev], StateList, 0, PhysTime, dT_lev);
 		if (myrank == 0) {
 			if (ErrorMonitor->outfile) ErrorMonitor->outfile << "find NaN in state variables at t = " << PhysTime << ", lev = " << lev << endl;
@@ -277,7 +282,8 @@ void bssn_class::Step_GPU(int lev, int YN) {
 			}
 			Pp = Pp->next;
 		}
-		GPUManager::getInstance().synchronize_all();
+		// As above, the following ghost exchange establishes the required
+		// producer-consumer waits per block stream.
 		// check error information
 		{
 			int erh = ERROR;
@@ -285,6 +291,9 @@ void bssn_class::Step_GPU(int lev, int YN) {
 		}
 
 		if (ERROR) {
+			// Preserve the diagnostic path: a host error still requires all
+			// producers to finish before dumping device-backed state.
+			GPUManager::getInstance().synchronize_all();
 			Parallel::Dump_Data(GH->PatL[lev], SynchList_pre, 0, PhysTime, dT_lev);
 			if (myrank == 0) {
 				if (ErrorMonitor->outfile)

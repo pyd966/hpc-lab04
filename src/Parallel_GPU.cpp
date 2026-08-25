@@ -10,6 +10,9 @@
 #include "MPatch.h"
 #include "helper.h"
 
+#include <algorithm>
+#include <vector>
+
 int Parallel::gpu_data_packer(
     double *d_data, MyList<Parallel::gridseg> *src, MyList<Parallel::gridseg> *dst, int rank_in, int dir,
     MyList<var> *VarLists, MyList<var> *VarListd, int Symmetry
@@ -25,6 +28,16 @@ int Parallel::gpu_data_packer(
     }
 
     int size_out = 0;
+
+    // A pack/unpack operation only consumes the streams of blocks that it
+    // actually visits. Keep this set local so host staging does not wait for
+    // unrelated blocks on the device.
+    std::vector<cudaStream_t> touched_streams;
+    auto touch_stream = [&touched_streams](cudaStream_t stream) {
+        if (std::find(touched_streams.begin(), touched_streams.end(), stream) == touched_streams.end()) {
+            touched_streams.push_back(stream);
+        }
+    };
 
     if (!src || !dst) return size_out;
 
@@ -78,6 +91,7 @@ int Parallel::gpu_data_packer(
                                 dst->data->shape[0], dst->data->shape[1], dst->data->shape[2], // 目标幽灵区的大小
                                 off_x, off_y, off_z
                             );
+                            touch_stream(src->data->Bg->stream);
                             break;
                         }
 
@@ -90,6 +104,7 @@ int Parallel::gpu_data_packer(
                                 dst->data->llb, dst->data->uub, 
                                 varls->data->SoA, Symmetry
                             );
+                            touch_stream(src->data->Bg->stream);
                             break;
                         }
 
@@ -102,6 +117,7 @@ int Parallel::gpu_data_packer(
                                 dst->data->llb, dst->data->uub, 
                                 varls->data->SoA, Symmetry
                             );
+                            touch_stream(src->data->Bg->stream);
                             break;
                         }
                         }
@@ -127,6 +143,7 @@ int Parallel::gpu_data_packer(
                             dst->data->shape[0], dst->data->shape[1], dst->data->shape[2], // 收到幽灵区数据的大小
                             off_x, off_y, off_z
                         );
+                        touch_stream(dst->data->Bg->stream);
                     }
                 }
                 size_out += dst->data->shape[0] * dst->data->shape[1] * dst->data->shape[2];
@@ -137,7 +154,9 @@ int Parallel::gpu_data_packer(
         dst = dst->next;
         src = src->next;
     }
-    GPUManager::getInstance().synchronize_all();
+    GPUManager::getInstance().synchronize_streams(
+        touched_streams.data(), touched_streams.size()
+    );
 
     return size_out;
 }

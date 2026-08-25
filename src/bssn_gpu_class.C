@@ -1,6 +1,8 @@
 
 #include <sstream>
 #include <cstdio>
+#include <algorithm>
+#include <vector>
 using namespace std;
 
 #include "macrodef.h"
@@ -2887,7 +2889,8 @@ void bssn_class::Constraint_Out()
                     }
                     Pp = Pp->next;
                 }
-                GPUManager::getInstance().synchronize_all();
+                // The following ghost exchange waits on the streams that
+                // carry the newly computed constraint data.
             }
             Parallel::Sync_GPU(GH->PatL[lev], ConstraintList, Symmetry);
         }
@@ -2996,7 +2999,8 @@ void bssn_class::Interp_Constraint(bool infg)
                     }
                     Pp = Pp->next;
                 }
-                GPUManager::getInstance().synchronize_all();
+                // The following ghost exchange waits on the streams that
+                // carry the newly computed constraint data.
             }
             Parallel::Sync_GPU(GH->PatL[lev], ConstraintList, Symmetry);
         }
@@ -3091,6 +3095,12 @@ void bssn_class::Interp_Constraint(bool infg)
 
     // 3. 遍历 Block 并针对活跃点派发 GPU 任务
     std::vector<int*> d_indices_to_free;
+    std::vector<cudaStream_t> touched_streams;
+    auto touch_stream = [&touched_streams](cudaStream_t stream) {
+        if (std::find(touched_streams.begin(), touched_streams.end(), stream) == touched_streams.end()) {
+            touched_streams.push_back(stream);
+        }
+    };
 
     for (int lev = GH->levels - 1; lev >= 0; lev--) {
         MyList<Patch> *Pp = GH->PatL[lev];
@@ -3110,6 +3120,7 @@ void bssn_class::Interp_Constraint(bool infg)
                     int active_count = active_points.size();
                     // 仅当此 Block 确实覆盖了目标点时，才触发 CUDA 拷贝和核函数
                     if (active_count > 0) {
+                        touch_stream(BP->stream);
                         int* d_active_indices;
                         cudaMalloc(&d_active_indices, active_count * sizeof(int));
                         cudaMemcpyAsync(d_active_indices, active_points.data(), active_count * sizeof(int), cudaMemcpyHostToDevice, BP->stream);
@@ -3138,8 +3149,11 @@ void bssn_class::Interp_Constraint(bool infg)
         }
     }
 
-    // 4. 同步所有流，并清理临时的 GPU 索引数组
-    GPUManager::getInstance().synchronize_all();
+    // 4. Only streams that wrote the shared interpolation result need to be
+    // complete before the host copy and MPI reduction.
+    GPUManager::getInstance().synchronize_streams(
+        touched_streams.data(), touched_streams.size()
+    );
     for (int* ptr : d_indices_to_free) cudaFree(ptr);
     delete[] assigned_bp;
 
@@ -3244,7 +3258,7 @@ void bssn_class::Compute_Constraint()
                             cg->d_fgfs[Cons_Gx->sgfn], cg->d_fgfs[Cons_Gy->sgfn], cg->d_fgfs[Cons_Gz->sgfn],
                             Symmetry, lev, ndeps, pre
                         );
-                        GPUManager::getInstance().synchronize_all();
+                        GPUManager::getInstance().synchronize_streams(&cg->stream, 1);
                         cg->move_to_cpu(RHSList);
                         cg->move_to_cpu(ConstraintList);
                     }

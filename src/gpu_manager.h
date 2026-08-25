@@ -2,6 +2,7 @@
 #define GPU_MANAGER_H
 
 #include <iostream>
+#include <cstddef>
 #include <cuda_runtime.h>
 
 #define CUDA_CHECK(call) \
@@ -35,6 +36,7 @@ public:
 
     cudaStream_t get_stream();
     void synchronize_all();
+    void synchronize_streams(const cudaStream_t* streams, std::size_t count);
 };
 
 #endif /* GPU_MANAGER_H */
