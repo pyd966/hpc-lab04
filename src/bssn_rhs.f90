@@ -398,6 +398,53 @@
   Gamzyz =HALF*( gupxz*( gxyz + gxzy - gyzx ) + gupyz*gyyz + gupzz*gzzy )
 #endif
 ! Raise indices of \tilde A_{ij} and store in R_ij
+#ifdef AMSS_ENABLE_RHS_AIJ_FUSION
+! The six raised Aij components are independent pointwise transforms.  They
+! are consumed immediately by the Gamma RHS, so keep them in one traversal.
+  do k=1,ex(3)
+  do j=1,ex(2)
+!$omp simd
+  do i=1,ex(1)
+    Rxx(i,j,k) = gupxx(i,j,k)*gupxx(i,j,k)*Axx(i,j,k) + &
+      gupxy(i,j,k)*gupxy(i,j,k)*Ayy(i,j,k) + &
+      gupxz(i,j,k)*gupxz(i,j,k)*Azz(i,j,k) + TWO*( &
+      gupxx(i,j,k)*gupxy(i,j,k)*Axy(i,j,k) + &
+      gupxx(i,j,k)*gupxz(i,j,k)*Axz(i,j,k) + &
+      gupxy(i,j,k)*gupxz(i,j,k)*Ayz(i,j,k))
+    Ryy(i,j,k) = gupxy(i,j,k)*gupxy(i,j,k)*Axx(i,j,k) + &
+      gupyy(i,j,k)*gupyy(i,j,k)*Ayy(i,j,k) + &
+      gupyz(i,j,k)*gupyz(i,j,k)*Azz(i,j,k) + TWO*( &
+      gupxy(i,j,k)*gupyy(i,j,k)*Axy(i,j,k) + &
+      gupxy(i,j,k)*gupyz(i,j,k)*Axz(i,j,k) + &
+      gupyy(i,j,k)*gupyz(i,j,k)*Ayz(i,j,k))
+    Rzz(i,j,k) = gupxz(i,j,k)*gupxz(i,j,k)*Axx(i,j,k) + &
+      gupyz(i,j,k)*gupyz(i,j,k)*Ayy(i,j,k) + &
+      gupzz(i,j,k)*gupzz(i,j,k)*Azz(i,j,k) + TWO*( &
+      gupxz(i,j,k)*gupyz(i,j,k)*Axy(i,j,k) + &
+      gupxz(i,j,k)*gupzz(i,j,k)*Axz(i,j,k) + &
+      gupyz(i,j,k)*gupzz(i,j,k)*Ayz(i,j,k))
+    Rxy(i,j,k) = gupxx(i,j,k)*gupxy(i,j,k)*Axx(i,j,k) + &
+      gupxy(i,j,k)*gupyy(i,j,k)*Ayy(i,j,k) + &
+      gupxz(i,j,k)*gupyz(i,j,k)*Azz(i,j,k) + &
+      (gupxx(i,j,k)*gupyy(i,j,k) + gupxy(i,j,k)*gupxy(i,j,k))*Axy(i,j,k) + &
+      (gupxx(i,j,k)*gupyz(i,j,k) + gupxz(i,j,k)*gupxy(i,j,k))*Axz(i,j,k) + &
+      (gupxy(i,j,k)*gupyz(i,j,k) + gupxz(i,j,k)*gupyy(i,j,k))*Ayz(i,j,k)
+    Rxz(i,j,k) = gupxx(i,j,k)*gupxz(i,j,k)*Axx(i,j,k) + &
+      gupxy(i,j,k)*gupyz(i,j,k)*Ayy(i,j,k) + &
+      gupxz(i,j,k)*gupzz(i,j,k)*Azz(i,j,k) + &
+      (gupxx(i,j,k)*gupyz(i,j,k) + gupxy(i,j,k)*gupxz(i,j,k))*Axy(i,j,k) + &
+      (gupxx(i,j,k)*gupzz(i,j,k) + gupxz(i,j,k)*gupxz(i,j,k))*Axz(i,j,k) + &
+      (gupxy(i,j,k)*gupzz(i,j,k) + gupxz(i,j,k)*gupyz(i,j,k))*Ayz(i,j,k)
+    Ryz(i,j,k) = gupxy(i,j,k)*gupxz(i,j,k)*Axx(i,j,k) + &
+      gupyy(i,j,k)*gupyz(i,j,k)*Ayy(i,j,k) + &
+      gupyz(i,j,k)*gupzz(i,j,k)*Azz(i,j,k) + &
+      (gupxy(i,j,k)*gupyz(i,j,k) + gupyy(i,j,k)*gupxz(i,j,k))*Axy(i,j,k) + &
+      (gupxy(i,j,k)*gupzz(i,j,k) + gupyz(i,j,k)*gupxz(i,j,k))*Axz(i,j,k) + &
+      (gupyy(i,j,k)*gupzz(i,j,k) + gupyz(i,j,k)*gupyz(i,j,k))*Ayz(i,j,k)
+  enddo
+  enddo
+  enddo
+#else
 
   Rxx =    gupxx * gupxx * Axx + gupxy * gupxy * Ayy + gupxz * gupxz * Azz + &
       TWO*(gupxx * gupxy * Axy + gupxx * gupxz * Axz + gupxy * gupxz * Ayz)
@@ -422,6 +469,7 @@
           (gupxy * gupyz       + gupyy * gupxz)* Axy                       + &
           (gupxy * gupzz       + gupyz * gupxz)* Axz                       + &
           (gupyy * gupzz       + gupyz * gupyz)* Ayz
+#endif
 
 ! Right hand side for Gam^i without shift terms...
   call fderivs(ex,Lap,Lapx,Lapy,Lapz,X,Y,Z,SYM,SYM,SYM,Symmetry,Lev)
