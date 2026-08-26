@@ -1,6 +1,7 @@
 #include "derivatives.h"
 
 #include "fmisc.h"
+#include "rhs_stencil_gpu.cuh"
 
 #include "macrodef.fh"
 #include <cmath>
@@ -28,9 +29,10 @@ __device__ void d_fderivs_point(
     const double dY = Y[1] - Y[0];
     const double dZ = Z[1] - Z[0];
 
-    const int imax = ex[0] - 1;
-    const int jmax = ex[1] - 1;
-    const int kmax = ex[2] - 1;
+    const int ex0 = ex[0], ex1 = ex[1], ex2 = ex[2];
+    const int imax = ex0 - 1;
+    const int jmax = ex1 - 1;
+    const int kmax = ex2 - 1;
 
     *fx = ZEO;
     *fy = ZEO;
@@ -49,8 +51,6 @@ __device__ void d_fderivs_point(
     if (symmetry > EQ_SYMM && fabs(X[0]) < dX) imin = -2; // 原代码为 -1，修正为 -2
     if (symmetry > EQ_SYMM && fabs(Y[0]) < dY) jmin = -2; // 原代码为 -1，修正为 -2
 
-    double SoA[3] = {SYM1, SYM2, SYM3};
-
     const double d12dx = ONE / F12 / dX;
     const double d12dy = ONE / F12 / dY;
     const double d12dz = ONE / F12 / dZ;
@@ -59,10 +59,7 @@ __device__ void d_fderivs_point(
     const double d2dy = ONE / TWO / dY;
     const double d2dz = ONE / TWO / dZ;
 
-    // Helper lambda for symmetry boundary access
-    const auto fh = [&](int ii, int jj, int kk) -> double {
-        return d_symmetry_bd_1b(2, ex, f, ii + 1, jj + 1, kk + 1, SoA);
-    };
+#define fh(ii, jj, kk) rhs_symmetry_load(2, ex0, ex1, ex2, f, (ii) + 1, (jj) + 1, (kk) + 1, SYM1, SYM2, SYM3)
     
     if (i + 2 <= imax && i - 2 >= imin &&
         j + 2 <= jmax && j - 2 >= jmin &&
@@ -82,6 +79,7 @@ __device__ void d_fderivs_point(
         *fz = d2dz * (-fh(i,j,k-1) + fh(i,j,k+1));
     }
 
+#undef fh
     (void)onoff;
 }
 
@@ -112,9 +110,10 @@ __device__ void d_fdderivs_point(
     const double dY = Y[1] - Y[0];
     const double dZ = Z[1] - Z[0];
 
-    const int imax = ex[0] - 1;
-    const int jmax = ex[1] - 1;
-    const int kmax = ex[2] - 1;
+    const int ex0 = ex[0], ex1 = ex[1], ex2 = ex[2];
+    const int imax = ex0 - 1;
+    const int jmax = ex1 - 1;
+    const int kmax = ex2 - 1;
 
     *fxx = ZEO; *fyy = ZEO; *fzz = ZEO;
     *fxy = ZEO; *fxz = ZEO; *fyz = ZEO;
@@ -125,8 +124,6 @@ __device__ void d_fdderivs_point(
     if (symmetry > NO_SYMM && fabs(Z[0]) < dZ) kmin = -2;
     if (symmetry > EQ_SYMM && fabs(X[0]) < dX) imin = -2;
     if (symmetry > EQ_SYMM && fabs(Y[0]) < dY) jmin = -2;
-
-    double SoA[3] = {SYM1, SYM2, SYM3};
 
     const double Sdxdx = ONE / (dX * dX);
     const double Sdydy = ONE / (dY * dY);
@@ -144,9 +141,7 @@ __device__ void d_fdderivs_point(
     const double Fdxdz = F1o144 / (dX * dZ);
     const double Fdydz = F1o144 / (dY * dZ);
 
-    const auto fh = [&](int ii, int jj, int kk) -> double {
-        return d_symmetry_bd_1b(2, ex, f, ii + 1, jj + 1, kk + 1, SoA);
-    };
+#define fh(ii, jj, kk) rhs_symmetry_load(2, ex0, ex1, ex2, f, (ii) + 1, (jj) + 1, (kk) + 1, SYM1, SYM2, SYM3)
     
     // --- 4th Order Accuracy ---
     if (i + 2 <= imax && i - 2 >= imin &&
@@ -188,5 +183,6 @@ __device__ void d_fdderivs_point(
         *fyz = Sdydz * (fh(i,j-1,k-1) - fh(i,j+1,k-1) - fh(i,j-1,k+1) + fh(i,j+1,k+1));
     }
 
+#undef fh
     (void)onoff;
 }

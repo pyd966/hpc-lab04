@@ -1,6 +1,7 @@
 #include "kodiss.h"
 
 #include "fmisc.h"
+#include "rhs_stencil_gpu.cuh"
 
 #include "macrodef.fh"
 #include <cmath>
@@ -23,20 +24,18 @@ __device__ double d_kodis_point(
     const double dY = Y[1] - Y[0];
     const double dZ = Z[1] - Z[0];
 
-    const int imax = ex[0] - 1;
-    const int jmax = ex[1] - 1;
-    const int kmax = ex[2] - 1;
+    const int ex0 = ex[0], ex1 = ex[1], ex2 = ex[2];
+    const int imax = ex0 - 1;
+    const int jmax = ex1 - 1;
+    const int kmax = ex2 - 1;
 
     int imin = 0, jmin = 0, kmin = 0;
     if (symmetry > NO_SYMM && fabs(Z[0]) < dZ) kmin = -3;
     if (symmetry == OCTANT && fabs(X[0]) < dX) imin = -3;
     if (symmetry == OCTANT && fabs(Y[0]) < dY) jmin = -3;
 
-    double SoA[3] = {SYM1, SYM2, SYM3};
 
-    const auto fh = [&](int ii, int jj, int kk) -> double {
-        return d_symmetry_bd_1b(3, ex, f, ii + 1, jj + 1, kk + 1, SoA);
-    };
+#define fh(ii, jj, kk) rhs_symmetry_load(3, ex0, ex1, ex2, f, (ii) + 1, (jj) + 1, (kk) + 1, SYM1, SYM2, SYM3)
 
     double rhs_add = 0.0;
 
@@ -54,5 +53,6 @@ __device__ double d_kodis_point(
         );
     }
 
+#undef fh
     return rhs_add;
 }

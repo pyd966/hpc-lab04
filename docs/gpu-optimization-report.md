@@ -2,7 +2,7 @@
 
 **日期：** 2026-08-26  
 **目标：** 官方 `t=100` 运行时间 `<=370s`  
-**当前版本：** `7c925619`（当前主线）
+**当前版本：** P0-A 实验实现（本次提交）
 
 ## 1. 结论
 
@@ -92,6 +92,32 @@ host/device 工作仍有串行化。launch 数量本身已经不是首要瓶颈�
 
 验收指标应包括 local load/store sectors、excessive global sectors、eligible warps、
 kernel wall time 和 `t=5` 端到端时间，不能只看 register 数。
+
+#### P0-A 实测结果（2026-08-26）
+
+保留的实现将 `d_fderivs_point`、`d_fdderivs_point`、`d_lopsided_point` 和
+`d_kodis_point` 中的 `double SoA[3]`/lambda 替换为同一 TU 内的
+`__device__ __forceinline__ rhs_symmetry_load`，并把 `ex[3]` 缓存在标量寄存器中。
+跨 TU 的完整 helper 强制 inline 没有保留，因为它增加寄存器压力后端到端变慢。
+
+| 版本 | `t=5` program mean | 结果 |
+|---|---:|---|
+| 阶段 4 主线 | `89.150199 +/- 0.301396s` | 3/3 PASS |
+| 仅 lopsided/KO accessor | `86.797500 +/- 0.131332s` | 3/3 PASS |
+| accessor + 两个导数 helper | `84.738476 +/- 0.765486s` | 3/3 PASS |
+| 最终回退无效 extent 实验后的单次复验 | `84.722587s` | PASS |
+
+对应 artifact 为 `gpu-benchmark-20260826T173115Z-64`、
+`gpu-benchmark-20260826T180848Z-66` 和
+`gpu-benchmark-20260826T184449Z-66`。最终 NCU（
+`gpu-ncu-20260826T181436Z-64`）显示 local-memory sector 占比从约 `85%`
+降到 `59%`，但寄存器从 `66` 增到 `107/thread`，理论 occupancy 为 `25%`；
+因此该结果应按端到端收益接受，不能继续以“降低寄存器数”为单一目标。
+
+额外的跨函数完整强制 inline 版本为 `90.637607s`，advection kernel 的 NCU
+显示 `66` registers/thread、理论 occupancy `37.5%`，但整体变慢，已回退。
+只把 advection 的 `dims[3]` 改为三个标量的实验为 `86.719597s`，没有稳定收益，
+也已回退。
 
 ### P0-B：为约束输出建立 constraint-only RHS 路径
 

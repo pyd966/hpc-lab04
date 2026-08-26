@@ -1,6 +1,7 @@
 #include "lopsidediff.h"
 
 #include "fmisc.h"
+#include "rhs_stencil_gpu.cuh"
 
 #include "macrodef.fh"
 #include <cmath>
@@ -22,11 +23,8 @@ __device__ double d_lopsided_point(
 
     if (i >= imax || j >= jmax || k >= kmax) return 0.0;
 
-    double SoA[3] = {SYM1, SYM2, SYM3};
-
-    const auto fh = [&](int ii, int jj, int kk) -> double { // 0-based -> 1-based
-        return d_symmetry_bd_1b(3, ex, f, ii + 1, jj + 1, kk + 1, SoA);
-    };
+    const int ex0 = ex[0], ex1 = ex[1], ex2 = ex[2];
+#define fh(ii, jj, kk) rhs_symmetry_load(3, ex0, ex1, ex2, f, (ii) + 1, (jj) + 1, (kk) + 1, SYM1, SYM2, SYM3)
 
     double rhs_add = 0.0;
 
@@ -99,5 +97,6 @@ __device__ double d_lopsided_point(
         }
     }
 
+#undef fh
     return rhs_add;
 }
