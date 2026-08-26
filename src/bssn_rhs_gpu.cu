@@ -19,7 +19,6 @@
 
 constexpr double SYM = 1.0;
 constexpr double ANTI = -1.0;
-constexpr double ZEO = 0.0;
 constexpr double ONE = 1.0;
 constexpr double TWO = 2.0;
 constexpr double FOUR = 4.0;
@@ -33,6 +32,87 @@ constexpr double FF = 0.75;
 constexpr double eta = 2.0;
 constexpr double F8 = 8.0;
 constexpr double F16 = 16.0;
+__device__ __forceinline__ void add_advection_dissipation(
+    const int dims[3], const double* field, double* rhs,
+    const double* betax, const double* betay, const double* betaz,
+    const double* X, const double* Y, const double* Z,
+    int symmetry, double sx, double sy, double sz, double eps,
+    int i, int j, int k, int idx
+) {
+    rhs[idx] += d_lopsided_point(
+        dims, field, rhs, betax, betay, betaz, X, Y, Z,
+        symmetry, sx, sy, sz, i, j, k);
+    if (eps > 0.0) {
+        rhs[idx] += d_kodis_point(
+            dims, field, X, Y, Z, sx, sy, sz,
+            symmetry, eps, i, j, k);
+    }
+}
+
+__global__ void rhs_advection_dissipation_kernel(
+    int ex0, int ex1, int ex2, double* X, double* Y, double* Z,
+    double* chi, double* trK,
+    double* dxx, double* gxy, double* gxz,
+    double* dyy, double* gyz, double* dzz,
+    double* Axx, double* Axy, double* Axz,
+    double* Ayy, double* Ayz, double* Azz,
+    double* Gamx, double* Gamy, double* Gamz,
+    double* Lap,
+    double* betax, double* betay, double* betaz,
+    double* dtSfx, double* dtSfy, double* dtSfz,
+    double* chi_rhs, double* trK_rhs,
+    double* gxx_rhs, double* gxy_rhs, double* gxz_rhs,
+    double* gyy_rhs, double* gyz_rhs, double* gzz_rhs,
+    double* Axx_rhs, double* Axy_rhs, double* Axz_rhs,
+    double* Ayy_rhs, double* Ayz_rhs, double* Azz_rhs,
+    double* Gamx_rhs, double* Gamy_rhs, double* Gamz_rhs,
+    double* Lap_rhs,
+    double* betax_rhs, double* betay_rhs, double* betaz_rhs,
+    double* dtSfx_rhs, double* dtSfy_rhs, double* dtSfz_rhs,
+    int symmetry, double eps
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int j = blockIdx.y * blockDim.y + threadIdx.y;
+    int k = blockIdx.z * blockDim.z + threadIdx.z;
+    if (i >= ex0 || j >= ex1 || k >= ex2) return;
+
+    int idx = IDX3D(i, j, k, ex0, ex1, ex2);
+    int dims[3] = {ex0, ex1, ex2};
+
+#define APPLY_ADVECTION(field, rhs, sx, sy, sz) \
+    add_advection_dissipation( \
+        dims, field, rhs, betax, betay, betaz, X, Y, Z, \
+        symmetry, sx, sy, sz, eps, i, j, k, idx)
+
+    APPLY_ADVECTION(dxx, gxx_rhs, SYM, SYM, SYM);
+    APPLY_ADVECTION(gxy, gxy_rhs, ANTI, ANTI, SYM);
+    APPLY_ADVECTION(gxz, gxz_rhs, ANTI, SYM, ANTI);
+    APPLY_ADVECTION(dyy, gyy_rhs, SYM, SYM, SYM);
+    APPLY_ADVECTION(gyz, gyz_rhs, SYM, ANTI, ANTI);
+    APPLY_ADVECTION(dzz, gzz_rhs, SYM, SYM, SYM);
+
+    APPLY_ADVECTION(Axx, Axx_rhs, SYM, SYM, SYM);
+    APPLY_ADVECTION(Axy, Axy_rhs, ANTI, ANTI, SYM);
+    APPLY_ADVECTION(Axz, Axz_rhs, ANTI, SYM, ANTI);
+    APPLY_ADVECTION(Ayy, Ayy_rhs, SYM, SYM, SYM);
+    APPLY_ADVECTION(Ayz, Ayz_rhs, SYM, ANTI, ANTI);
+    APPLY_ADVECTION(Azz, Azz_rhs, SYM, SYM, SYM);
+
+    APPLY_ADVECTION(chi, chi_rhs, SYM, SYM, SYM);
+    APPLY_ADVECTION(trK, trK_rhs, SYM, SYM, SYM);
+    APPLY_ADVECTION(Gamx, Gamx_rhs, ANTI, SYM, SYM);
+    APPLY_ADVECTION(Gamy, Gamy_rhs, SYM, ANTI, SYM);
+    APPLY_ADVECTION(Gamz, Gamz_rhs, SYM, SYM, ANTI);
+    APPLY_ADVECTION(Lap, Lap_rhs, SYM, SYM, SYM);
+    APPLY_ADVECTION(betax, betax_rhs, ANTI, SYM, SYM);
+    APPLY_ADVECTION(betay, betay_rhs, SYM, ANTI, SYM);
+    APPLY_ADVECTION(betaz, betaz_rhs, SYM, SYM, ANTI);
+    APPLY_ADVECTION(dtSfx, dtSfx_rhs, ANTI, SYM, SYM);
+    APPLY_ADVECTION(dtSfy, dtSfy_rhs, SYM, ANTI, SYM);
+    APPLY_ADVECTION(dtSfz, dtSfz_rhs, SYM, SYM, ANTI);
+
+#undef APPLY_ADVECTION
+}
 
 __global__ void rhs_kernel(
     int ex0, int ex1, int ex2, double T, double* X, double* Y, double* Z,
@@ -706,145 +786,8 @@ __global__ void rhs_kernel(
     // Rxx[idx] = l_Rxx; Ryy[idx] = l_Ryy; Rzz[idx] = l_Rzz;
     // Rxy[idx] = l_Rxy; Rxz[idx] = l_Rxz; Ryz[idx] = l_Ryz;
 
-    // ------------------------------------------------------------------------------------
-    // bssn_advection_dissipation_kernel
-    // ------------------------------------------------------------------------------------
-
-    // 准备平流所需的速度场 (Shift)
-    // lopsided 需要传入 shift 的指针来判断上风方向
-    // device 函数内部会根据 i,j,k 读取 betax[idx] 等
-
-    // 定义对称性常量 (对应 Fortran 的 array 定义)
-    // SSS: (1, 1, 1)
-    // AAS: (-1, -1, 1)
-    // ASA: (-1, 1, -1)
-    // SAA: (1, -1, -1)
-    // ASS: (-1, 1, 1)
-    // SAS: (1, -1, 1)
-    // SSA: (1, 1, -1)
-
-    // =========================================================
-    // Block 1: Metric Variables (gxx, gxy, gxz, gyy, gyz, gzz)
-    // =========================================================
-    
-    // gxx (SSS)
-    // Fortran: call lopsided(..., gxx, gxx_rhs, ..., SSS)
-    // Note: Passing dxx for derivative calculation is equivalent to gxx
-    gxx_rhs[idx] += d_lopsided_point(dims, dxx, gxx_rhs, betax, betay, betaz, X, Y, Z, symmetry, SYM, SYM, SYM, i, j, k);
-    if (eps > 0.0) gxx_rhs[idx] += d_kodis_point(dims, dxx, X, Y, Z, SYM, SYM, SYM, symmetry, eps, i, j, k);
-
-    // gxy (AAS)
-    gxy_rhs[idx] += d_lopsided_point(dims, gxy, gxy_rhs, betax, betay, betaz, X, Y, Z, symmetry, ANTI, ANTI, SYM, i, j, k);
-    if (eps > 0.0) gxy_rhs[idx] += d_kodis_point(dims, gxy, X, Y, Z, ANTI, ANTI, SYM, symmetry, eps, i, j, k);
-
-    // gxz (ASA)
-    gxz_rhs[idx] += d_lopsided_point(dims, gxz, gxz_rhs, betax, betay, betaz, X, Y, Z, symmetry, ANTI, SYM, ANTI, i, j, k);
-    if (eps > 0.0) gxz_rhs[idx] += d_kodis_point(dims, gxz, X, Y, Z, ANTI, SYM, ANTI, symmetry, eps, i, j, k);
-
-    // gyy (SSS)
-    gyy_rhs[idx] += d_lopsided_point(dims, dyy, gyy_rhs, betax, betay, betaz, X, Y, Z, symmetry, SYM, SYM, SYM, i, j, k);
-    if (eps > 0.0) gyy_rhs[idx] += d_kodis_point(dims, dyy, X, Y, Z, SYM, SYM, SYM, symmetry, eps, i, j, k);
-
-    // gyz (SAA)
-    gyz_rhs[idx] += d_lopsided_point(dims, gyz, gyz_rhs, betax, betay, betaz, X, Y, Z, symmetry, SYM, ANTI, ANTI, i, j, k);
-    if (eps > 0.0) gyz_rhs[idx] += d_kodis_point(dims, gyz, X, Y, Z, SYM, ANTI, ANTI, symmetry, eps, i, j, k);
-
-    // gzz (SSS)
-    gzz_rhs[idx] += d_lopsided_point(dims, dzz, gzz_rhs, betax, betay, betaz, X, Y, Z, symmetry, SYM, SYM, SYM, i, j, k);
-    if (eps > 0.0) gzz_rhs[idx] += d_kodis_point(dims, dzz, X, Y, Z, SYM, SYM, SYM, symmetry, eps, i, j, k);
-
-    // =========================================================
-    // Block 2: Extrinsic Curvature (Axx ... Azz)
-    // =========================================================
-
-    // Axx (SSS)
-    Axx_rhs[idx] += d_lopsided_point(dims, Axx, Axx_rhs, betax, betay, betaz, X, Y, Z, symmetry, SYM, SYM, SYM, i, j, k);
-    if (eps > 0.0) Axx_rhs[idx] += d_kodis_point(dims, Axx, X, Y, Z, SYM, SYM, SYM, symmetry, eps, i, j, k);
-
-    // Axy (AAS)
-    Axy_rhs[idx] += d_lopsided_point(dims, Axy, Axy_rhs, betax, betay, betaz, X, Y, Z, symmetry, ANTI, ANTI, SYM, i, j, k);
-    if (eps > 0.0) Axy_rhs[idx] += d_kodis_point(dims, Axy, X, Y, Z, ANTI, ANTI, SYM, symmetry, eps, i, j, k);
-
-    // Axz (ASA)
-    Axz_rhs[idx] += d_lopsided_point(dims, Axz, Axz_rhs, betax, betay, betaz, X, Y, Z, symmetry, ANTI, SYM, ANTI, i, j, k);
-    if (eps > 0.0) Axz_rhs[idx] += d_kodis_point(dims, Axz, X, Y, Z, ANTI, SYM, ANTI, symmetry, eps, i, j, k);
-
-    // Ayy (SSS)
-    Ayy_rhs[idx] += d_lopsided_point(dims, Ayy, Ayy_rhs, betax, betay, betaz, X, Y, Z, symmetry, SYM, SYM, SYM, i, j, k);
-    if (eps > 0.0) Ayy_rhs[idx] += d_kodis_point(dims, Ayy, X, Y, Z, SYM, SYM, SYM, symmetry, eps, i, j, k);
-
-    // Ayz (SAA)
-    Ayz_rhs[idx] += d_lopsided_point(dims, Ayz, Ayz_rhs, betax, betay, betaz, X, Y, Z, symmetry, SYM, ANTI, ANTI, i, j, k);
-    if (eps > 0.0) Ayz_rhs[idx] += d_kodis_point(dims, Ayz, X, Y, Z, SYM, ANTI, ANTI, symmetry, eps, i, j, k);
-
-    // Azz (SSS)
-    Azz_rhs[idx] += d_lopsided_point(dims, Azz, Azz_rhs, betax, betay, betaz, X, Y, Z, symmetry, SYM, SYM, SYM, i, j, k);
-    if (eps > 0.0) Azz_rhs[idx] += d_kodis_point(dims, Azz, X, Y, Z, SYM, SYM, SYM, symmetry, eps, i, j, k);
-
-    // =========================================================
-    // Block 3: Scalar Variables (chi, trK)
-    // =========================================================
-
-    // chi (SSS)
-    chi_rhs[idx] += d_lopsided_point(dims, chi, chi_rhs, betax, betay, betaz, X, Y, Z, symmetry, SYM, SYM, SYM, i, j, k);
-    if (eps > 0.0) chi_rhs[idx] += d_kodis_point(dims, chi, X, Y, Z, SYM, SYM, SYM, symmetry, eps, i, j, k);
-
-    // trK (SSS)
-    trK_rhs[idx] += d_lopsided_point(dims, trK, trK_rhs, betax, betay, betaz, X, Y, Z, symmetry, SYM, SYM, SYM, i, j, k);
-    if (eps > 0.0) trK_rhs[idx] += d_kodis_point(dims, trK, X, Y, Z, SYM, SYM, SYM, symmetry, eps, i, j, k);
-
-    // =========================================================
-    // Block 4: Gauge Variables - Conformal Connection (Gam)
-    // =========================================================
-
-    // Gamx (ASS)
-    Gamx_rhs[idx] += d_lopsided_point(dims, Gamx, Gamx_rhs, betax, betay, betaz, X, Y, Z, symmetry, ANTI, SYM, SYM, i, j, k);
-    if (eps > 0.0) Gamx_rhs[idx] += d_kodis_point(dims, Gamx, X, Y, Z, ANTI, SYM, SYM, symmetry, eps, i, j, k);
-
-    // Gamy (SAS)
-    Gamy_rhs[idx] += d_lopsided_point(dims, Gamy, Gamy_rhs, betax, betay, betaz, X, Y, Z, symmetry, SYM, ANTI, SYM, i, j, k);
-    if (eps > 0.0) Gamy_rhs[idx] += d_kodis_point(dims, Gamy, X, Y, Z, SYM, ANTI, SYM, symmetry, eps, i, j, k);
-
-    // Gamz (SSA)
-    Gamz_rhs[idx] += d_lopsided_point(dims, Gamz, Gamz_rhs, betax, betay, betaz, X, Y, Z, symmetry, SYM, SYM, ANTI, i, j, k);
-    if (eps > 0.0) Gamz_rhs[idx] += d_kodis_point(dims, Gamz, X, Y, Z, SYM, SYM, ANTI, symmetry, eps, i, j, k);
-
-    // =========================================================
-    // Block 5: Gauge Variables - Lapse & Shift
-    // =========================================================
-
-    // Lap (SSS) - Note: bam code does not apply dissipation on gauge vars usually, but Fortran logic here DOES for Lap
-    Lap_rhs[idx] += d_lopsided_point(dims, Lap, Lap_rhs, betax, betay, betaz, X, Y, Z, symmetry, SYM, SYM, SYM, i, j, k);
-    if (eps > 0.0) Lap_rhs[idx] += d_kodis_point(dims, Lap, X, Y, Z, SYM, SYM, SYM, symmetry, eps, i, j, k);
-
-    // betax (ASS)
-    betax_rhs[idx] += d_lopsided_point(dims, betax, betax_rhs, betax, betay, betaz, X, Y, Z, symmetry, ANTI, SYM, SYM, i, j, k);
-    if (eps > 0.0) betax_rhs[idx] += d_kodis_point(dims, betax, X, Y, Z, ANTI, SYM, SYM, symmetry, eps, i, j, k);
-
-    // betay (SAS)
-    betay_rhs[idx] += d_lopsided_point(dims, betay, betay_rhs, betax, betay, betaz, X, Y, Z, symmetry, SYM, ANTI, SYM, i, j, k);
-    if (eps > 0.0) betay_rhs[idx] += d_kodis_point(dims, betay, X, Y, Z, SYM, ANTI, SYM, symmetry, eps, i, j, k);
-
-    // betaz (SSA)
-    betaz_rhs[idx] += d_lopsided_point(dims, betaz, betaz_rhs, betax, betay, betaz, X, Y, Z, symmetry, SYM, SYM, ANTI, i, j, k);
-    if (eps > 0.0) betaz_rhs[idx] += d_kodis_point(dims, betaz, X, Y, Z, SYM, SYM, ANTI, symmetry, eps, i, j, k);
-
-    // =========================================================
-    // Block 6: Gauge Variables - Time derivative of Shift (dtSf)
-    // =========================================================
-
-    // dtSfx (ASS)
-    dtSfx_rhs[idx] += d_lopsided_point(dims, dtSfx, dtSfx_rhs, betax, betay, betaz, X, Y, Z, symmetry, ANTI, SYM, SYM, i, j, k);
-    if (eps > 0.0) dtSfx_rhs[idx] += d_kodis_point(dims, dtSfx, X, Y, Z, ANTI, SYM, SYM, symmetry, eps, i, j, k);
-
-    // dtSfy (SAS)
-    dtSfy_rhs[idx] += d_lopsided_point(dims, dtSfy, dtSfy_rhs, betax, betay, betaz, X, Y, Z, symmetry, SYM, ANTI, SYM, i, j, k);
-    if (eps > 0.0) dtSfy_rhs[idx] += d_kodis_point(dims, dtSfy, X, Y, Z, SYM, ANTI, SYM, symmetry, eps, i, j, k);
-
-    // dtSfz (SSA)
-    dtSfz_rhs[idx] += d_lopsided_point(dims, dtSfz, dtSfz_rhs, betax, betay, betaz, X, Y, Z, symmetry, SYM, SYM, ANTI, i, j, k);
-    if (eps > 0.0) dtSfz_rhs[idx] += d_kodis_point(dims, dtSfz, X, Y, Z, SYM, SYM, ANTI, symmetry, eps, i, j, k);
-
+    // This independent pass is launched after rhs_kernel so constraint
+    // temporaries do not stay live across 24 advection/dissipation calls.
     // ------------------------------------------------------------------------------------
     // bssn_constraints_kernel
     // ------------------------------------------------------------------------------------
@@ -1072,5 +1015,27 @@ void gpu_compute_rhs_bssn_launch( // launch kernel with device pointers
         d_ham_Res, d_movx_Res, d_movy_Res, d_movz_Res,
         d_Gmx_Res, d_Gmy_Res, d_Gmz_Res,
         symmetry, lev, eps, co
+    );
+    rhs_advection_dissipation_kernel<<<grid, block, 0, stream>>>(
+        ex[0], ex[1], ex[2], d_X, d_Y, d_Z,
+        d_chi, d_trK,
+        d_dxx, d_gxy, d_gxz,
+        d_dyy, d_gyz, d_dzz,
+        d_Axx, d_Axy, d_Axz,
+        d_Ayy, d_Ayz, d_Azz,
+        d_Gamx, d_Gamy, d_Gamz,
+        d_Lap,
+        d_betax, d_betay, d_betaz,
+        d_dtSfx, d_dtSfy, d_dtSfz,
+        d_chi_rhs, d_trK_rhs,
+        d_gxx_rhs, d_gxy_rhs, d_gxz_rhs,
+        d_gyy_rhs, d_gyz_rhs, d_gzz_rhs,
+        d_Axx_rhs, d_Axy_rhs, d_Axz_rhs,
+        d_Ayy_rhs, d_Ayz_rhs, d_Azz_rhs,
+        d_Gamx_rhs, d_Gamy_rhs, d_Gamz_rhs,
+        d_Lap_rhs,
+        d_betax_rhs, d_betay_rhs, d_betaz_rhs,
+        d_dtSfx_rhs, d_dtSfy_rhs, d_dtSfz_rhs,
+        symmetry, eps
     );
 }

@@ -42,6 +42,20 @@ os.sched_setaffinity(0, SCHEDULER_AFFINITY)
 
 import AMSS_NCKU_Input as input_data
 
+# A shortened evolution window is useful for profiler iterations that cannot
+# fit the full fixed workload into the cluster wall-time limit. It is opt-in;
+# normal and grading runs continue to use AMSS_NCKU_Input.py unchanged.
+_final_time_override = os.environ.get("AMSS_NCKU_FINAL_TIME")
+if _final_time_override:
+    try:
+        _final_time_override = float(_final_time_override)
+    except ValueError:
+        sys.exit(" AMSS_NCKU_FINAL_TIME must be a finite number")
+    if not (input_data.Start_Evolution_Time < _final_time_override
+            <= input_data.Final_Evolution_Time):
+        sys.exit(" AMSS_NCKU_FINAL_TIME must be above Start_Evolution_Time "
+                 "and no greater than the configured Final_Evolution_Time")
+    input_data.Final_Evolution_Time = _final_time_override
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -151,6 +165,9 @@ else:
 input_data.File_directory = File_directory
 
 print(f"==> Build    : {BUILD_DIR}")
+if _final_time_override:
+    print(f"==> WARNING  : shortened evolution window t="
+          f"{input_data.Start_Evolution_Time}..{input_data.Final_Evolution_Time}")
 print(f"==> Output   : {File_directory}")
 print(f"==> Cache    : {CACHE_ROOT}")
 

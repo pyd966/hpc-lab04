@@ -109,6 +109,30 @@ GW250118/AMSS_NCKU_output/
 GW250118/figure/
 ```
 
+### GPU cluster workflows
+
+The GPU path has separate scripts for a formal run, repeatable timing, and
+profiling:
+
+```bash
+# Official t=100 run and correctness check
+hpc submit ./hpc_gpu_run.sh
+
+# Three short t=5 baseline repetitions (development only)
+hpc submit -e AMSS_BENCHMARK_RUNS=3,AMSS_BENCHMARK_TIME=5 \
+  ./hpc_gpu_benchmark.sh
+
+# Host and GPU profiling; preparation is outside the measured region
+hpc submit -e AMSS_PROFILE_TOOL=vtune ./hpc_gpu_profile.sh
+hpc submit -e AMSS_PROFILE_TOOL=nsys ./hpc_gpu_profile.sh
+hpc submit -e AMSS_PROFILE_TOOL=ncu,NCU_KERNEL_REGEX=rhs_kernel \
+  ./hpc_gpu_profile.sh
+```
+
+See [`docs/gpu-baseline-profile.md`](docs/gpu-baseline-profile.md) for timing
+boundaries, measured baseline results, the post-TwoPuncture execution flow, and
+profiler-driven optimization priorities.
+
 ## Correctness check
 
 ```bash
