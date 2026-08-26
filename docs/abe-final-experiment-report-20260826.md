@@ -1,296 +1,529 @@
-# AMSS-NCKU CPU/GPU 优化实验报告草稿
+# Lab04 CPU/GPU 优化实验报告
 
-日期：2026-08-26  
-最终 CPU 提交：`d01e5d7`（`Tile RHS Ricci updates by row`）
+日期：2026-08-26
 
-## 1. 实验目标和报告口径
+本报告按照“最开始的 baseline profile -> TwoPuncture 优化 -> ABE 优化”
+组织。短程 t=0..4 用于快速筛选和交错 A/B，最终版本使用完整 t=0..40
+验收。每项重要优化都同时检查运行时间、profile 指标和数值正确性。
 
-本实验优化的是一条完整的科学计算流水线：Python 参数生成和启动、
-TwoPuncture 初值求解、BSSN/AMR 时间演化、结果输出和正确性检查。所有保留的
-优化都同时满足两个条件：
+## 1. 运行环境
 
-1. 端到端时间或目标子阶段有可重复的改善；
-2. 课程检查通过，主要数值输出在忽略时间戳后逐位一致。
+### CPU 环境
 
-短程 `t=0..4` 用于筛选候选，采用同一作业内交错 A/B 运行；最终结果使用完整
-`t=0..40` 验证。`perf stat` 用于硬件计数器，`perf record -g` 用于函数、调用路径
-和源代码行定位；OpenMP 诊断额外记录每个 level 的 block 利用率、最长 block、
-Sync、AMR transfer 和 regrid 时间。
+实验使用 lab4 队列的 HiSilicon TaiShan-v120/AArch64 节点。作业申请
+60 个逻辑 CPU 和 100 GiB 内存，实际 cpuset 对应 30 个物理核，每核有
+两个 SMT sibling。整机有 4 个 NUMA node，但本次作业的 CPU 和内存均位于
+一个 NUMA node，因此没有跨 NUMA 访问。
 
-## 2. 运行环境和最终配置
+CPU 支持 128-bit NEON/ASIMD 和 SVE，当前进程的 SVE vector length 为
+256 bit。每个物理核有 64 KiB L1D、64 KiB L1I 和 1280 KiB L2，每个 NUMA
+node 有 56 MiB L3。实际最高频率约为 2.9 GHz。
 
-### 2.1 CPU 平台
+最开始 baseline 的配置为：
 
-- 节点：HiSilicon TaiShan-v120 / AArch64；作业实际 cpuset 为 60 个逻辑 CPU，
-  对应 30 个物理核、每核 2 个 SMT sibling。
-- 全机有 4 个 NUMA node；本次作业的 CPU 和内存限制在一个 NUMA node，未出现
-  跨 NUMA 访问。
-- CPU 支持 ASIMD/NEON、SVE、FP16/BF16、dot-product 和矩阵相关扩展；应用的
-  浮点内核最终使用严格 `-O3`，没有全局 `-mcpu=native`、SVE 或 fast-math。
-- 资源：`lab4`，60 CPU、100 GiB、30 分钟。
-- 演化配置：单进程 OpenMP-only ABE，`OMP_NUM_THREADS=30`，
-  `OMP_PLACES=cores`，`OMP_PROC_BIND=close`，`OMP_SCHEDULE=dynamic,1`。
-- 静态层：24 blocks / 24 threads；移动层：30 blocks / 30 threads。
-- ABE production 编译：`-O3`；profile 编译：
-  `-O3 -g -fno-omit-frame-pointer`。
-- TwoPuncture production 编译：`-O3 -march=native`，并使用 OpenMP；没有使用
-  `-Ofast`。
+~~~text
+ABE：30 MPI rank x 1 thread
+绑定：mpiexec --map-by core --bind-to core
+编译：-O3 -g -fno-omit-frame-pointer
+TwoPuncture：单进程单线程，-O3 -g -fno-omit-frame-pointer
+~~~
 
-最终运行脚本为 [`hpc_cpu.sh`](../hpc_cpu.sh)，会根据作业内 CPU/core 映射自动计算
-物理核数，设置 OpenMP 线程和 block 几何。当前公开队列只能提供 30 个物理核，
-因此 60 物理核评测拓扑尚未在同一队列完成 sweep。
+最终 CPU 配置为：
 
-### 2.2 GPU 平台
+~~~text
+ABE：1 process x 30 OpenMP threads，不启动 MPI runtime（rank 语义为 1）
+OMP_NUM_THREADS=30
+OMP_PLACES=cores
+OMP_PROC_BIND=close
+OMP_SCHEDULE=dynamic,1
+静态层：24 blocks / 24 threads
+移动层：30 blocks / 30 threads
+ABE production：-O3
+TwoPuncture production：-O3 -march=native
+~~~
 
-GPU 路径使用课程的 A100 MIG 分区：一个 `1g.10gb` MIG 实例、16 个 CPU、24 GiB
-内存；主机为 x86_64，默认工具链为 GNU 13、OpenMPI 5 和 CUDA 12.4。
+profile 版本额外保留 -g -fno-omit-frame-pointer，并使用 perf stat、
+perf record -g 和 GCC vectorization report 定位函数、调用路径和源代码行。
+最终 production 没有使用 -Ofast、fast-math 或全局 SVE 编译参数。
 
-- 可执行程序：`ABEGPU`；初值程序仍为 `TwoPunctureABE`。
-- CUDA 架构：`CMAKE_CUDA_ARCHITECTURES=80`（`sm_80`）。
-- GPU profile/benchmark 使用 1 个 MPI rank，通过 `mpiexec --bind-to core` 启动；
-  OpenMP 关闭。
-- CUDA 编译使用 `-rdc=true`、`CUDA_SEPARABLE_COMPILATION=ON` 和 `-lineinfo`。
-- `AMSS_MPI_CUDA_AWARE=0`，因此默认通信路径是 host staging；没有在没有 MPI
-  能力证明的情况下强行启用 CUDA-aware MPI。
+### GPU 环境
 
-本轮主要开发和验收集中在 CPU ABE。GPU 路径完成了构建、短程 benchmark 以及
-Nsight Systems/Compute 采集入口的核对，但没有形成经过完整 `t=100` 端到端 A/B
-验证的 GPU 优化提交。因此报告只把上述内容作为 GPU 最终运行配置，不宣称 GPU
-端到端加速。
+GPU 路径使用 NVIDIA A100 MIG 分区，一个 1g.10gb MIG 实例，16 个 CPU，
+24 GiB 资源；主机工具链为 GNU 13、OpenMPI 5 和 CUDA 12.4。
 
-## 3. Baseline 和第一次 profile
+~~~text
+程序：ABEGPU + TwoPunctureABE
+启动：1 MPI rank，mpiexec --bind-to core
+OpenMP：关闭
+CUDA architecture：sm_80
+CUDA：-rdc=true，separable compilation，-lineinfo
+AMSS_MPI_CUDA_AWARE=0，默认使用 host staging
+~~~
 
-### 3.1 早期 MPI baseline：为什么改变并行模型
+本轮主要完成 CPU 优化。GPU 路径完成了构建、短程 benchmark 以及 Nsight
+Systems/Compute 采样入口验证，但没有形成经过完整 t=100 A/B 的 GPU 优化
+提交。因此这里只给出 GPU 最终运行配置，不宣称没有充分数据支持的 GPU 加速。
 
-最初的 ABE 使用 30 个 MPI rank、每个 rank 一个线程。早期完整 profile 中，
-Open MPI shared-memory BTL 的 `mca_btl_sm_poll_handle_frag` 约占 **58.98%**，
-另外约 11% 来自 MPI 内部地址和 progress 路径；`compute_rhs_bssn_` 只有约
-6.10%。level 0 实际只有约 9 个有工作的 block，其他 rank 在同步点等待。
+## 2. 最开始的 baseline 和 profile
 
-这说明当时的第一瓶颈不是某一条 Fortran 公式，而是单节点 MPI 的共享内存通信、
-progress 和层级负载不均衡。因此先将 ABE 改成单进程 OpenMP-only，并保留旧 MPI
-接口的类型兼容层。转换后 ABE 不再链接 MPI runtime：collective 退化成本地操作，
-点对点通信在单进程语义下为空操作。
+### 2.1 程序总体流程
 
-### 3.2 朴素 OpenMP 转换暴露的问题
+程序的主流程可以省略为：
 
-第一次 P1 实验使用 1 个进程、30 个 OpenMP 线程。虽然去掉了 MPI，但 `t=0..4`
-Evolve 从 MPI 版本约 173.7 s 变成约 542 s，慢约 3.12 倍；平均只有 **3.23/30**
-个 CPU 在运行。profile 显示 `compute_rhs_bssn_`、`polint_`、导数和插值路径已经
-被放进 OpenMP worker，但粗层 block 数太少，层间递归、Sync 和插值仍然串行，
-线程创建/汇合及临时分配开销被放大。
+~~~text
+run.sh / Python driver
+  -> 生成参数和运行目录
+  -> TwoPuncture
+       -> Newton + BiCGSTAB 求解黑洞初值
+       -> 输出 Ansorg.psid
+  -> ABE
+       -> 建立 9 层 AMR 网格并读入初值
+       -> Evolve
+            -> RecursiveStep 按层级和时间细分递归
+                 -> Step
+                      -> predictor + 3 个 corrector
+                      -> 每个 RK 阶段计算 RHS、更新状态、处理边界和 Sync
+                 -> restrict/prolong、层间 Sync 和必要的 regrid
+            -> AnalysisStuff / Constraint_Out / 输出
+  -> Python 整理结果和 checker
+~~~
 
-这个失败实验很重要：它证明“删掉 MPI”本身不是优化，必须把并行区放在 block/patch
-等足够外层，并重新设计任务几何。
+RecursiveStep 的层级顺序和 Step 内 Sync 前后的 barrier 都是数值依赖的一部分，
+不能直接删除。可以并行的是同一阶段中彼此独立的 block、谱线、网格点和分析点。
 
-### 3.3 可比较的 ABE P0 基线
+### 2.2 baseline 性能和正确性
 
-经过外层 block 并行、绑核和调度重构后，得到后续 A/B 的 P0 基线：
+最初未修改算法的作业使用 30 个 MPI rank。TwoPuncture 初值阶段实测约
+294.6 s；ABE 从 t=0 演化到 t=33 后触及 30 分钟硬限制。ABE 每个物理时间
+单位平均约 43.1 s，因此线性外推：
 
-| 指标 | P0 基线均值 |
+| 部分 | 最初 baseline |
 |---|---:|
-| ABE Evolve `t=0..40` | `298.655 s` |
-| ABE Total | `301.339 s` |
-| `This Program Cost` | `313.763 s` |
-| 外层 wall | `322.5 s` |
-| 平均内存 | 约 4 GiB |
+| TwoPuncture | 294.6 s |
+| ABE Before Evolve | 3.72 s |
+| ABE Evolve t=0..40 | 约 1724 s，线性外推 |
+| 完整流程 | 约 2020 s，线性外推 |
 
-P0 短程 profile 的主要热点为：`compute_rhs_bssn_` 约 **41.47%**，
-`__memcpy_sve` **12.57%**，`lopsided_` **8.54%**，
-`__memset_sve_zva64` **5.82%**，`prolong3_` **4.90%**，`fdderivs_` **4.64%**。
-平均 CPU 约 22.65/30，IPC 1.80，branch miss 0.43%，L1D miss 3.86%，
-LLC load miss 37.35%，dTLB miss 3.41%。
+已经完成的 33 个时间点中，波形匹配 33/100，trajectory RMS 为 0，约束检查
+33 个时间组 x 9 个 AMR level 全部 PASS。作业没有完成是性能问题，不是数值
+错误。因为 baseline 的 t=40 没有真正跑完，后文会明确区分“baseline 外推”
+和“最终完整实测”。
 
-因此问题被判断为：RHS 是最大的计算/访存热点；`memcpy`、`memset` 和 AMR transfer
-是第二类数据搬运热点；平均 CPU 偏低主要来自层级依赖和 block 数量，而不是线程
-迁移或异常分支预测。
+### 2.3 TwoPuncture baseline profile
 
-## 4. TwoPuncture 初值阶段
+TwoPuncture 实际是单线程程序，没有 MPI 通信，也没有 OpenMP parallel region。
+带调试符号的独立 profile 用时 286.5 s，平均只使用 0.999 个 CPU：
 
-TwoPuncture 同时服务 CPU 和 GPU，因此先处理其独立 profile 发现的热点，再回到
-ABE 演化。
+| 指标 | baseline |
+|---|---:|
+| IPC | 2.60 |
+| branch miss | 1.22% |
+| L1D miss | 2.51% |
+| LLC miss | 0.05% |
+| dTLB miss | 0.35% |
+| 峰值内存 | 约 81 MB |
 
-### 4.1 消除高频临时分配
+cache、TLB 和分支指标都没有异常，LLC miss 很低。因此这里不是通信或主存
+带宽瓶颈，首先是串行计算问题。
 
-profile 发现 `chebft`、`fourft`、`Derivatives_AB3`、`F_of_v`、`J_times_dv`、
-`LineRelax` 和 Thomas 求解器反复申请短数组。为每个线程建立独立的
-`TransformWorkspace`、`PointWorkspace` 和 `LineWorkspace`，复用 scratch，避免
-在热点路径 `malloc/free`；Thomas scratch 显式传参并标记 no-alias。
+主要调用路径为：
 
-结果是指令约减少 3.65%、cycles 约减少 2.08%，但该轮节点频率较低，wall time
-没有稳定下降。因此结论是“确实减少了工作量，但不能仅凭一次 wall time 宣称加速”。
-正确性方面，BiCGSTAB 迭代、残差、`puncture_parameters_new.txt` 和去时间戳后的
-`Ansorg.psid` 均与基线一致。
+~~~text
+Solve
+  -> Newton
+    -> bicgstab                         97.12%
+      -> relax                          66.85%
+        -> LineRelax_be / LineRelax_al
+          -> ThomasAlgorithm
+      -> J_times_dv                     27.03%
+        -> Derivatives_AB3              25.86%
+          -> Chebyshev/Fourier transform
+~~~
 
-### 4.2 预计算谱变换系数
+cos() 自身约占 23.17%，热点 line solve 中的 malloc/free 至少占 6.07%。
+这两个现象分别说明谱变换在重复计算固定系数，热点路径还在反复申请短数组。
+因此先处理这两项，再根据新的 profile 决定是否改编译参数和并行化。
 
-网格尺寸固定，Chebyshev/Fourier 变换中的三角函数输入只由网格下标决定。因此在
-每个 workspace 中缓存实际出现的 Chebyshev cosine 表和 Fourier sine/cosine 表，
-消除变换内重复的 `cos/sin` 调用；没有改变求和顺序，也没有改成 FFT。
+### 2.4 ABE baseline profile
 
-这是 TwoPuncture 中收益最大的单项：相对前一阶段 wall time 约下降 **31.10%**，
-cycles 约下降 29.59%，`cos` 从约 23.65% 的 self samples 降到不可见水平。这个
-优化的本质是把重复的 libm 计算变成小型只读表访问，而不是提前知道整个演化过程。
+ABE baseline 的第一瓶颈不是 BSSN 数值公式，而是单节点 MPI 通信和等待：
 
-### 4.3 编译参数和 OpenMP
+| 热点 | cycles/sample |
+|---|---:|
+| mca_btl_sm_poll_handle_frag | 58.98% |
+| 其他 MPI/OpenPAL progress 路径 | 约 17% |
+| compute_rhs_bssn | 6.10% |
+| polint / memcpy | 1.54% / 1.17% |
 
-`-Ofast -march=native` 在 TwoPuncture standalone benchmark 中比严格 `-O3` 快约
-5.29%，但放宽浮点语义可能改变求解结果，因此最终配置没有采用 `-Ofast`。随后对
-谱导数、逐点方程和红黑/颜色线松弛进行 OpenMP 并行：不同谱线、不同网格点和同一
-颜色 phase 的线彼此独立，Thomas 三对角递推仍保持单线串行；200 次 relax 迭代放在
-一个持久 parallel region 中，避免重复 fork/join。
+调用图进一步显示：
 
-严格 `-O3` 下 standalone benchmark 的 30/60 线程结果约为 11.399/11.091 s，
-但当前 SMT 节点上 60 线程只比 30 线程快约 1.6%，因此生产脚本选择 30 个物理核。
-最终 TwoPuncture 只保留严格 `-O3 -march=native` 和 OpenMP。详细阶段记录见
-[`TwoPuncture 阶段 1`](twopuncture-stage1-allocations.md)、
-[`阶段 2`](twopuncture-stage2-coefficients.md)、
-[`阶段 3`](twopuncture-stage3-compiler-flags.md) 和
-[`阶段 4`](twopuncture-stage4-openmp.md)。
+~~~text
+Evolve
+  -> RecursiveStep(0)
+    -> Step(0)
+      -> AnalysisStuff
+        -> surf_MassPAng / surf_Wave
+          -> Interp_Points
+            -> PMPI_Allreduce
+~~~
 
-## 5. ABE 的主要优化过程
+PMPI_Allreduce 的 inclusive 样本约 74.52%，AnalysisStuff 约 72.55%。分析
+阶段对 8 个半径反复归约完整的插值中间数组，每次分析交给 collective 的输入
+总量约 47.2 MB。level 0 又只有约 9 个 rank 持有有效 block，因此少数 rank
+做插值，其余 rank 在归约中等待。
 
-### 5.1 先做可证明的 SIMD 优化
+perf stat 表面上显示平均 29.9/30 个 CPU 活跃，但大量时间是在 MPI progress
+中忙等。IPC 1.89、branch miss 1.07%、LLC load miss 约 50.5%、dTLB miss
+约 7.6%；这些指标混入了 MPI 自旋，不能用于判断 RHS 的纯计算效率。
 
-早期源码行 profile 显示 `kodis`、`fdderivs`、`fderivs` 和 `lopsided` 的规则内点
-循环存在边界分支，编译器没有稳定生成向量循环。做法是把规则内点与边界薄层拆开，
-只对连续的 `i` 方向内点加 `!$omp simd`，边界和 symmetry 逻辑保持原样。
+这个 profile 决定了 ABE 的优化顺序：先消除 MPI/Allreduce 和 rank 负载
+不均衡，再重新 profile 数值内核；如果一开始只优化占 6.1% 的 RHS，端到端
+收益上限很低。
 
-- `kodis`：显式移出三维边界判断后，NEON 双精度向量指令出现，短程 Evolve
-  **7.43%**，逐位一致，默认开启。
-- `fdderivs`：规则内点 SIMD，Evolve 约 **2.94%–3.21%**，默认开启。
-- `fderivs`：规则内点 SIMD，交错 A/B Evolve 约 **1.31%**，默认开启。
-- `lopsided`：虽然生成了 SIMD，但同时计算正、负两套 stencil，再用符号选择，
-  额外访存抵消收益，Evolve 基本持平（约 `+0.006%`）。代码保留但不能把它写成
-  性能收益。
+## 3. TwoPuncture 优化
 
-这些优化都只改变循环组织，不改变边界公式和浮点表达式顺序；A/B 输出逐位一致。
+### 3.1 消除热点临时分配
 
-### 5.2 重新设计 OpenMP 外层任务和几何
+针对 chebft、fourft、Derivatives_AB3、F_of_v、J_times_dv、LineRelax
+和 ThomasAlgorithm 的短数组，建立可复用的 TransformWorkspace、
+PointWorkspace 和 LineWorkspace。workspace 是线程私有的，也为后续 OpenMP
+避免了 scratch 数据竞争。
 
-在 `bssn_class::Step` 外层按 block 建立工作列表，覆盖 predictor、corrector、
-RHS、RK 更新和 block 级分析；`RecursiveStep` 仍负责 AMR 层之间的依赖顺序。移动
-层使用 `dynamic,1`，静态层减少到 24 个 worker，避免把只有少量 block 的层分给 30
-个线程。Sync、prolong/restrict 和 regrid 在每个阶段边界保留必要同步。
+修改后 allocator 符号从热点 profile 中消失，instructions 下降 3.65%，cycles
+下降 2.08%。但该次作业平均频率低 2.84%，wall time 从 286.505 s 变成
+288.720 s，反而慢 0.77%。所以这一步不能宣称 wall-clock 加速，只能说明
+确实减少了工作量，集群频率波动掩盖了收益。
 
-实验表明：
+第一次实现还因为 Thomas 每条线重新查询 TLS、别名关系不清楚而更慢。把 scratch
+显式传给 Thomas 并标记 no-alias 后，Thomas 热点恢复正常。最终 BiCGSTAB
+迭代、残差、参数文件和去时间戳后的 Ansorg.psid 均与 baseline 逐位一致。
 
-- 60 OpenMP worker 在当前 SMT 节点慢 **36.7%**，IPC 约减半，dTLB miss 增加；
-- 30 worker 下把 block 目标增到 60/90 反而慢，虽然 LLC/IPC 表面改善，但边界、
-  ghost、Sync 和调度次数增加；
-- 只增加移动层 block 也慢约 5.1%。
+### 3.2 预计算并缓存谱变换系数
 
-所以最终不是追求“平均 CPU 数最大”，而是保持 30 worker、24/30 block/thread 和
-`dynamic,1`。最终 OpenMP 诊断中 level 5--8 利用率约 84%–89%，level 0 只有 9 个
-block，剩余空转主要是算法层级依赖，不是绑核失败。
+固定 nA=50、nB=50、nphi=26 后，Chebyshev/Fourier 变换的角度只由网格尺寸和
+循环下标决定。因此初始化时生成 Chebyshev forward/inverse cosine 表和
+Fourier sine/cosine 表，后续直接读取。求和顺序没有改变，也没有改成 FFT。
 
-### 5.3 减少确定存在的数据搬运
+| 指标 | 内存复用后 | 系数缓存后 | 变化 |
+|---|---:|---:|---:|
+| wall time | 288.720 s | 198.918 s | -31.10% |
+| cycles | 808.832 B | 569.511 B | -29.59% |
+| instructions | 2067.696 B | 1233.737 B | -40.33% |
+| cos() self | 23.65% | <0.5% | 热点基本消失 |
 
-这一步针对 profile 中的 `memcpy/memset`，每次都先做地址重叠证明和 A/B。
+相对最初独立 baseline 286.505 s，严格 -O3 版本累计快约 30.6%。这是
+TwoPuncture 中最大的单项串行优化。
 
-| 优化 | 关键位置 | 端到端结果 | 决定 |
+第一次实现把 1./M 和 Pi*fac 改写成了数学等价但浮点顺序不同的表达式，
+导致场文件末位差异。恢复原运算顺序后，所有迭代信息和输出逐位一致。这说明
+即使只是缓存系数，也必须保留浮点表达式顺序并做完整回归。
+
+### 3.3 编译参数实验
+
+缓存 cos 后，profile 的约 93% 集中到 LineRelax_be/al 和 ThomasAlgorithm，
+不再有值得更换 libm、BLAS 或 FFT 库的热点。
+
+同一作业内测试发现：
+
+- -O3 -mcpu=native 基本持平；
+- 额外 -funroll-loops 没有收益；
+- -Ofast -march=native 比 -O3 快约 5.29%；
+- -Ofast 的 Ansorg.psid 最大绝对差约 4e-15，不再逐位一致。
+
+考虑到后续还要修改并行和数值内核，最终没有采用 -Ofast，只保留严格
+-O3 -march=native，避免把 fast-math 的误差和代码优化混在一起。
+
+### 3.4 OpenMP 并行化
+
+新的 profile 已经非常集中，所以按调用路径寻找可证明独立的工作：
+
+- Derivatives_AB3 在每个方向内部按独立谱线并行；A、B、phi 三阶段之间保留
+  barrier，因为后一个方向会读取前一个方向的导数。
+- F_of_v 和 J_times_dv 按独立网格点并行，每个线程使用私有 PointWorkspace。
+- LineRelax 原本已有红黑/颜色 phase，同一 phase 的线互不依赖，可以并行；
+  不同 phase 之间保留 barrier。
+- 单条长度约 50 的 Thomas 递推仍串行，通过同时处理多条线获得并行度。
+- 原先连续调用 200 次 relax，现在放进同一个 parallel region，避免 200 次
+  fork/join；没有必要手写 worker pool。
+
+线程 sweep 为：
+
+| OpenMP threads | time | 相对 1 thread |
+|---:|---:|---:|
+| 1 | 215.162 s | 1.00x |
+| 4 | 63.013 s | 3.42x |
+| 8 | 31.114 s | 6.92x |
+| 16 | 16.499 s | 13.04x |
+| 30 | 10.375 s | 20.74x |
+| 60 | 10.363 s | 20.76x |
+
+严格 -O3 -march=native 的最终复测中，30/60 线程分别约 11.399/11.091 s。
+60 个逻辑线程只比 30 个物理核快约 1.6%，却消耗接近两倍 task-clock，所以
+最终选择 30 线程。相对最初 286.5 s baseline，TwoPuncture 最终约加速 25 倍。
+
+最终 profile 中 LineRelax_be、LineRelax_al 和 Thomas 的计算样本合计约 55%，
+libgomp barrier/work-sharing 约 41%。IPC 3.34，branch miss 0.28%，L1D miss
+1.96%，LLC miss 0.06%，dTLB miss 0.25%。热点已经从重复 cos 和串行计算
+转移到 line relaxation 必需的 phase 同步，继续简单增加线程意义不大。
+
+## 4. ABE 优化
+
+### 4.1 从 MPI 转为 OpenMP
+
+baseline profile 显示单节点 MPI 和 Allreduce 占据主要时间，因此采用一个进程、
+30 个 OpenMP 线程，而不是 MPI+OpenMP。源码中保留少量 MPI 类型兼容接口，但
+OMP-only 构建不启动 MPI runtime、不链接 libmpi；单进程下的 rank、size 和
+reduce 退化为本地语义。
+
+第一次只并行部分 block/RHS 循环时，t=0..4 Evolve 从 MPI baseline 的
+173.669 s 变成 542.358 s，平均只使用 3.23/30 个 CPU。这次失败说明“删掉 MPI”
+本身不会自动得到并行：原来由不同 rank 执行的 Sync、copy、restrict、prolong、
+分析和约束计算仍然落在主线程上。
+
+后续把原 MPI 所有权代表的工作显式展开成 OpenMP 工作：
+
+- Step 的 predictor 和三个 corrector 按 block 并行 RHS、RK 更新和边界处理；
+- Sync、restrict3、prolong3、copy 按 grid segment x variable 建立 operation；
+- pack 阶段并行读取源 block，barrier 后再按变量顺序写目标，避免重叠区域竞争；
+- RecursiveStep 仍按 AMR 层级和时间依赖串行组织，不强行并发不同 level；
+- 分析和 constraint 的 block/球面点计算也交给 OpenMP。
+
+性能过程如下：
+
+| 版本 | 进程 x 线程 | Evolve t=0..4 |
+|---|---:|---:|
+| 最初 MPI baseline | 30 x 1 | 173.669 s |
+| 只并行部分 block 的初版 | 1 x 30 | 542.358 s |
+| 完成 block 和 transfer 转换 | 1 x 30 | 61.883 s |
+| transfer team/workspace | 1 x 30 | 61.477 s |
+
+完整转换后平均 CPU 从 3.23 提高到约 16.4，说明 MPI 隐含的主要工作已经被
+OpenMP 接管。所有改动均保持输出一致。
+
+### 4.2 重写 AnalysisStuff 的数据流
+
+MPI baseline 的最热调用路径是 AnalysisStuff -> Interp_Points ->
+PMPI_Allreduce。旧代码对 8 个半径生成完整 pox/shellf，反复搜索 block、调用
+通用 polint，并对大中间数组归约。
+
+在单地址空间下，为每个半径预先缓存球面点所属 block、六阶插值下标/权重和
+wave 系数。线程处理自己负责的球面点，插值后立刻累加到线程私有的小结果，
+最后只做 OpenMP reduction，不再生成和归约几十 MB shellf。
+
+| 版本 | Evolve t=0..4 | ABE Total |
+|---|---:|---:|
+| 完整 OpenMP transfer | 61.477 s | 68.761 s |
+| AnalysisStuff 重写后 | 43.869 s | 51.249 s |
+
+Evolve 下降约 28.6%，是 ABE 早期最大的单项优化。相对最初 MPI baseline，
+此时 Evolve 已经快约 4 倍。新旧分析路径的演化状态一致，Psi4 仅在理论零项
+出现约 1.48e-22 的舍入差异，课程 checker 通过。
+
+### 4.3 消除隐藏的串行 constraint 路径
+
+完成 MPI 到 OpenMP 后，cycles profile 已经以 RHS 为主，但全程平均 CPU 仍偏低。
+普通 perf record 没有明显显示原因，因为一个串行函数运行 7 秒，只产生一个核
+的 cycles，在 30 核 profile 中占比会被稀释。
+
+因此增加 phase wall-time，比较总 wall、Step、Sync、transfer 和 constraint 的
+时间，发现 Constraint_Out 每个物理时间单位都会在主线程上逐 block 重算 RHS，
+短程约占 7 秒。随后把高频 Constraint_Out，以及进入 Evolve 前的
+Compute_Constraint、Interp_Constraint RHS 重算按 block 并行：
+
+| 指标 | 修改前 | 修改后 | 变化 |
+|---|---:|---:|---:|
+| Evolve t=0..4 | 37.682 s | 30.171 s | -19.9% |
+| ABE Total | 44.405 s | 35.579 s | -19.9% |
+| 平均 CPU | 17.07 | 21.45 | +25.7% |
+
+高频 constraint 自身从 6.999 s 降到 0.793 s，约加速 8.82 倍；两条初始
+constraint 路径约加速 9 倍。IPC/cache/TLB 基本不变，说明收益来自消除串行
+wall time，而不是单核指令变快。输出逐位一致，checker PASS。
+
+### 4.4 OpenMP 调度和任务几何
+
+诊断显示移动 level 5--8 才承担主要计算，level 0 只有 9 个 block。主 RK block
+phase 的利用率其实已有约 85%，所以“全程只用 16 个 CPU”并不表示 RHS 主区也只
+用了 16 个线程。
+
+我们先尝试仅更换 static/dynamic/guided，但当 30 blocks 对应 30 workers 时，
+每个线程只有一个大任务，调度器无法接管其他线程的尾部。中间版本把 block 增加
+到 60 并使用 dynamic,1，曾得到约 3.05% 收益；但是在后续版本重新校准几何时：
+
+| 几何 | Evolve t=0..4 |
+|---|---:|
+| 24/30 blocks | 29.899 s |
+| 60/60 blocks | 31.864 s |
+| 90/90 blocks | 35.511 s |
+
+block 过多会增加 ghost zone、边界、Sync 和调度工作，所以最终恢复静态层
+24、移动层 30，并保留 dynamic,1 处理不同 block 的不均衡。
+
+60 个 OpenMP worker 使用 SMT sibling 时比 30 worker 慢约 36.7%，IPC 约从
+1.47 降到 0.76，dTLB miss 从约 3.62% 升到 10.46%。因此最终使用 30 个物理核，
+而不是追求表面上的 60 个活跃硬件线程。
+
+最终诊断中 level 1--4 利用率约 79%--80%，level 5--8 约 84%--89%，level 0
+约 30%。剩余空转主要来自 AMR 层级依赖、粗层 block 上限和阶段间 Sync，不是
+绑核失败。跨整个 RK4 的持久 parallel team 也实际测试过，但回退约 10%--12%，
+因为真实 barrier 仍存在，整个 team 反而一起等待，所以没有保留。
+
+### 4.5 stencil SIMD
+
+通信热点消除后，profile 的主要热点转移到 compute_rhs_bssn、kodis、fdderivs、
+lopsided、fderivs 和 memcpy/memset。GCC 报告显示 kodis 和导数循环中的边界
+分支阻碍自动向量化。
+
+优化方法是把规则内点和边界薄层分开，只对 Fortran 连续存储的 i 方向内点使用
+!$omp simd；边界公式和每个点的浮点运算顺序不变。
+
+| 函数 | profile 契机 | Evolve 收益 | 正确性 |
 |---|---|---:|---|
-| symmetry ghost 冗余清零 | `symmetry_bd` | Evolve 约 `0.60%`，Total 约 `1.04%` | 保留、默认 ON |
-| 同级 Sync 直接复制 | `omp_execute_cached_sync` | Evolve 约 `1.02%` | 保留、默认 ON |
-| block field arena | `Block` 字段分配 | Evolve 约 `0.65%`；dTLB 约 3.7% 降到 1.4% | 保留、默认 ON |
-| prolong3 相邻点复用 | `prolong3_pair_kernel` | Evolve 约 `1.27%` | 保留、默认 ON |
-| direct AMR 输出 | `omp_local_transfer` | 约 `0.24%`，低于噪声 | 默认 OFF |
+| kodis | 8.13% 热点，原循环无向量指令 | 7.43% | 逐位一致 |
+| fdderivs | 8.03%，混合二阶导数热行 | 2.94%--3.21% | PASS |
+| fderivs | 一阶导数仍为热点 | 1.31% | 逐位一致 |
+| lopsided | 符号分支阻碍 SIMD | 约 +0.006%，持平 | PASS |
 
-同级 Sync 的直接路径只对几何证明互不重叠的矩形生效，其他操作仍回退到旧的
-pack/unpack；因此它不会破坏有读后写风险的 transfer。连续 arena 只改变字段的
-分配位置和生命周期，未改变数组索引或数学计算。
+kodis 优化后 self samples 从 8.13% 降到约 2.29%，fdderivs 从 8.03% 降到
+4.13%，说明确实命中了目标热点。lopsided 虽然生成了 SIMD，但同时计算正负
+两套 stencil，额外访问抵消了向量收益，所以不能把它写成有效加速。
 
-### 5.4 RHS 局部数据复用：从失败融合到成功分块
+### 4.6 减少数据搬运和 TLB 压力
 
-在 P0 profile 中，`compute_rhs_bssn` 是第一热点。先尝试把多个完整数组表达式合成
-一个循环，但 profile 发现活跃向量值、地址流和寄存器压力增加，IPC 下降：
+新的 profile 中 memcpy、memset、Sync 和 AMR transfer 变成第二类热点。每项
+改动都先证明读写区域是否重叠，并保留安全 fallback：
 
-- 18 个 second-kind connection 一次融合：约回退 2.0%；拆成小组后仍回退约 0.7%；
+| 优化 | 针对瓶颈 | 收益/指标变化 | 决定 |
+|---|---|---|---|
+| symmetry ghost 去掉冗余清零 | memset | Evolve 0.60%，Total 1.04% | 保留 |
+| 同级 Sync direct copy | 两次 pack/unpack 和 memcpy | Evolve 约 1.02% | 保留 |
+| prolong3 相邻点复用 | AMR 插值重复输入 | Evolve 约 1.27% | 保留 |
+| block field arena | 分散字段和 dTLB | Evolve 0.65%，dTLB 3.7% -> 1.4% | 保留 |
+| direct AMR transfer | pack/unpack | 约 0.24%，低于噪声 | 关闭 |
+
+同级 Sync 只有在几何证明源/目标不重叠时才直接复制，存在读后写风险的 operation
+仍使用旧 pack-before-unpack。arena 只改变持久字段的分配位置和生命周期，不改变
+数组索引或数学计算。上述保留项均逐位一致。
+
+### 4.7 RHS 局部复用：从失败融合到 Ricci 行分块
+
+后期 profile 中 compute_rhs_bssn 占 41%--51%，六个 Ricci 大表达式合计约
+16.76%，是最值得处理的计算热点。编译器已经能够沿 i 方向生成 128-bit NEON，
+问题不是“完全没有向量化”，而是六次完整三维遍历反复读取相同度规、连接系数
+和导数，输入在不同分量之间难以留在近端缓存。
+
+先测试了多种大范围融合：
+
+- 18 个 connection 一次融合：回退约 2.0%；
+- 分组 connection 融合：仍回退约 0.7%；
 - Aij 六字段融合：回退约 0.76%；
-- chi derivative/Ricci producer-consumer 融合：回退约 0.37%–1.47%；
-- 三个 first-kind connection 全融合：回退约 0.56%。
+- chi/Ricci producer-consumer 融合：回退约 0.37%--1.47%；
+- 三字段 first-kind connection 融合：回退约 0.56%。
 
-这些失败实验说明“少一次数组遍历”不一定抵消更大的 SIMD live set；当前内核受缓存
-和寄存器供给限制，而不是单纯受循环控制开销限制。
+这些实验减少了循环次数，却扩大了 live set、地址流和寄存器压力。由此把方案
+改成小范围复用：只融合两个 first-kind connection，Evolve 提升约 1.13%；
+六个 Ricci 不合成一个巨型循环，而是按 j=1 行分块：
 
-之后保留了两个小范围方案：
+~~~text
+k
+  -> 一个 j 行
+       -> Rxx / Ryy / Rzz / Rxy / Rxz / Ryz
+            -> 连续 i SIMD
+~~~
 
-1. 只融合两个 first-kind connection 字段，避免扩大活跃输出集，Evolve 提升
-   **1.13%**，默认开启；
-2. 将六个 Ricci 更新按 `j=1` 行分块：最内层仍是连续 `i` SIMD 循环，六个分量
-   逐个计算但共享同一行的输入缓存。交错 A/B 中 Evolve 从约 28.90 s 降到
-   26.81 s，提升 **7.26%**；指令基本不变，IPC 约 1.43 升到 1.55，LLC misses
-   下降。这是最终版本收益最大的 ABE 内核优化。
+交错 ABBAAB 结果为：
 
-### 5.5 小批量、清零和编译器尾部实验
-
-这些实验用于验证 profile 中“看起来可以减少工作”的方向，但没有全部进入生产：
-
-- `fderivs` 双字段 batch：慢约 `0.067%`；lopsided 双字段 batch 三轮分别慢
-  `1.13%`、`1.57%`、`1.22%`。原因是每个字段仍要单独 ghost/清零，批处理增加
-  活跃数组和寄存器压力，默认关闭。
-- `fderivs/fdderivs` 只清零边界：数值正确但慢 `1.0%–2.2%`；完全跳过清零会破坏
-  下游边界零值语义，逐位检查失败。保留原始整数组清零。
-- lopsided ghost-only：第一次版本出现 NaN；修正边界后仍慢约 `0.23%`，默认关闭。
-- huge page：单独字段提示慢约 `1.45%`；arena 上启用 THP 仍慢约 `0.35%`。说明
-  arena 已经解决主要 dTLB 压力，THP 没有额外收益。
-- 64B 对齐慢约 `0.86%`；LTO 只快 `0.32%`；`-mtune=native` 与基线持平；显式
-  SVE 慢约 `13.5%`。因此最终使用空的 ABE 架构 flags 和严格 `-O3`。
-- `rungekutta4` 只占约 2%，而 RHS 数据必须跨 RK stage 保存；RHS/RK 融合会增加
-  生命周期和寄存器风险，没有实现。
-- 没有更换 BLAS/FFT/数学库：当前 profile 没有 BLAS/FFT 热点，`pow` 约只有
-  `0.6%`，而真正主热点是项目内部 RHS、stencil 和数据搬运。
-
-## 6. 最终 profile 和最终性能
-
-最终 profile 作业 `166216` 使用当前提交和带符号 `-O3`，`perf record` 采集 66,284
-个样本，无丢样。短程 `t=0..4` 的最终热点为：
-
-| 函数 | cycles |
+| 版本 | Evolve 均值 |
 |---|---:|
-| `compute_rhs_bssn_` | `47.08%` |
-| `__memcpy_sve` | `10.42%` |
-| `lopsided_core_` | `9.78%` |
-| `__memset_sve_zva64` | `5.89%` |
-| `fdderivs_` | `4.58%` |
-| `kodis_` | `2.82%` |
-| `prolong3_pair_kernel_` | `2.75%` |
-| `fderivs_` | `2.60%` |
+| 原始六次完整数组遍历 | 28.9043 s |
+| j=1 行分块 | 26.8057 s |
 
-硬件计数器为 IPC `1.54`、branch miss `0.49%`、L1D miss `3.97%`、LLC load miss
-`48.29%`、dTLB miss `1.44%`；CPU migration 和 context switch 均为 0。RHS 仍是
-第一热点，但其六个 Ricci 行的绝对样本已经明显下降；热点占比上升的部分是总执行
-时间缩短后的重新归一化，不代表这些函数变慢。
+Evolve 下降 7.26%。instructions 只增加 0.14%，IPC 从约 1.43 升到 1.55，
+cycles 下降 8.11%，LLC load misses 下降 15.88%，六个 Ricci 热行的样本从
+16.76% 降到 9.55%。因此收益来自缓存复用，而不是少算公式或增加线程。j=2/4/8
+逐渐变慢，说明 tile 变大后工作集和复用距离反而增加，最终只保留 j=1。
 
-最终 profile 工件：[`perf stat`](../profile/abe-20260826T020426Z-14/perf-stat.txt)、
-[`flat profile`](../profile/abe-20260826T020426Z-14/perf-report-flat.txt)、
-[`source-line profile`](../profile/abe-20260826T020426Z-14/perf-report-lines.txt)。
+六个表达式和每个点的浮点顺序没有改变，所有 A/B 输出逐位一致，课程检查 PASS。
+RHS/RK4 融合没有实施：RHS 必须跨 RK stage 保存，而 RK routine 只占约 2%，
+融合仍需保存 RHS 并会扩大 live set，没有可信收益。
 
-最终正式 `t=40` 作业 `166233`：
+### 4.8 没有采用的实验
+
+失败尝试也反映了对瓶颈的判断过程：
+
+- fderivs 小批量慢约 0.07%，lopsided batch 慢 1.1%--1.6%；
+- 导数只清零边界虽然正确，但慢 1%--2%；完全跳过清零会导致数值检查失败；
+- THP 在独立字段上慢 1.45%，在 arena 上仍慢 0.35%；
+- 64-byte 对齐慢 0.86%，LTO 只快 0.32%，-mtune=native 基本持平；
+- 显式 SVE 编译参数慢约 13.5%，IPC 明显下降；
+- direct AMR、prolong3 显式 SIMD 和多种大 RHS 融合低于噪声或回退；
+- 没有更换数学库，因为最终热点是项目内部 stencil/RHS，不是 BLAS、FFT 或 libm。
+
+这些结果说明当前程序并非只要“更多向量、更大 batch、更多线程”就会更快。大数组
+工作集和 AMR 边界成本会让一些理论上减少循环的改动在实际机器上变慢。
+
+## 5. 最终 profile、性能和正确性
+
+最终 profile 使用当前提交、严格 -O3 -g、单进程 30 OpenMP 线程、24/30
+block 和 dynamic,1。perf record 采集 66,284 个样本，无丢样：
+
+| 最终热点 | cycles/sample |
+|---|---:|
+| compute_rhs_bssn | 47.08% |
+| memcpy | 10.42% |
+| lopsided_core | 9.78% |
+| memset | 5.89% |
+| fdderivs | 4.58% |
+| kodis | 2.82% |
+| prolong3_pair_kernel | 2.75% |
+| fderivs | 2.60% |
+
+最终硬件指标为 IPC 1.54、branch miss 0.49%、L1D miss 3.97%、LLC load miss
+48.29%、dTLB miss 1.44%，CPU migration 和 context switch 均为 0。分支预测、
+TLB 和绑核没有异常；剩余主要瓶颈是 RHS 数组流、memcpy/memset 以及不可避免的
+AMR 层级同步。
+
+最终完整 t=40 作业 166233：
 
 | 指标 | 最终结果 |
 |---|---:|
-| ABE Evolve | `271.451 s` |
-| ABE Total Running | `275.067 s` |
-| `This Program Cost` | **`286.162 s`** |
-| 外层 wall | `295 s` |
-| 峰值内存 | 约 `3.84 GiB` |
-| trajectory RMS | `0` |
-| constraints | 40 个时间组 × 9 个 level，全部 PASS |
+| ABE Evolve | 271.451 s |
+| ABE Total Running | 275.067 s |
+| This Program Cost | 286.162 s |
+| 外层 wall | 295 s |
+| 峰值内存 | 约 3.84 GiB |
+| trajectory RMS | 0 |
+| constraints | 40 个时间组 x 9 个 level 全部 PASS |
+| checker | FINAL: PASS |
 
-相对 P0 的 `This Program Cost = 313.763 s`，最终端到端改善约 **8.8%**；Evolve
-改善约 **9.1%**。最终检查结果见 [`check.txt`](../profile/baseline-20260826T020719Z-$/check.txt)。
+## 6. 与最开始 baseline 的最终比较
 
-## 7. 结论
+最开始 baseline 没有在时限内完成 t=40，所以最终比较必须注明哪些是实测、
+哪些是线性外推：
 
-整个优化过程可以概括为三次瓶颈转移：
+| 部分 | 最开始 baseline | 最终版本 | 变化 |
+|---|---:|---:|---:|
+| TwoPuncture 独立 profile | 286.5 s，1 CPU | 约 11.4 s，30 OMP threads | 约 25x |
+| ABE t=0..4 | 173.669 s，30 MPI ranks | 26.538 s，1 x 30 OMP | 约 6.55x |
+| ABE t=0..40 | 约 1724 s，线性外推 | 271.451 s，完整实测 | 约 6.35x |
+| 完整流程 | 约 2020 s，线性外推 | 286.162 s，完整实测 | 约 7.1x |
 
-1. 原始 MPI 版本首先受共享内存通信、progress 和 rank 负载不均衡限制；
-2. OpenMP-only 版本稳定后，瓶颈转移到规则网格 RHS、stencil 以及 memcpy/memset；
-3. SIMD、外层 block 调度、直接 Sync、arena 和局部 RHS 分块后，剩余主要成本是
-   `compute_rhs_bssn` 内尚未消除的数组流，以及不可避免的层级同步和 AMR 数据搬运。
+最终完整流程相对最开始 baseline 的粗略时间下降约 86%。这个 7.1x 是由
+baseline 已完成的 33 个时间单位外推得到，不能写成同一次完整 A/B；各项优化的
+因果收益应以前文同节点交错实验为准。最终版本则是真正跑满 t=40，并通过全部
+正确性检查，低于 330 s 目标。
 
-最终版本没有依赖不安全的 fast-math、未经验证的 SVE、盲目增加线程或大范围公式
-融合；每一项保留的改动都有对应 profile 证据和数值回归结果。当前唯一重要的
-环境不确定性是评测平台可能提供 60 个独立物理核，需在该拓扑上重新校准 block
-几何；这不影响当前提交在公开 30 物理核节点上的正确性和 330 秒目标结果。
+## 7. 总结
+
+优化过程发生了三次清晰的瓶颈转移：
+
+1. 最开始 TwoPuncture 是单线程、重复 cos 和 line solve 热点；ABE 则主要在
+   MPI shared-memory progress、AnalysisStuff 的 Allreduce 和 rank 等待；
+2. TwoPuncture 缓存系数并行化、ABE 改为完整 OpenMP 后，热点转移到串行
+   constraint、RHS/stencil 和 AMR 数据搬运；
+3. constraint 并行、SIMD、direct Sync、arena 和 Ricci 行分块之后，剩余成本
+   集中在 compute_rhs_bssn 的数组流、memcpy/memset 和真实 AMR 层级依赖。
+
+最终保留的优化都有 profile 证据、可重复的时间方向和正确性回归。没有为了
+追求更高表面 CPU 使用率而删除必要 barrier，也没有采用不稳定的 -Ofast、显式
+SVE、过量 block 或大范围公式融合。
