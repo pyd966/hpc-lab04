@@ -47,13 +47,14 @@ find_vtune() {
 cd "$ROOT_DIR"
 mkdir -p profile
 
+ARTIFACT_ROOT="${AMSS_PROFILE_ROOT:-$ROOT_DIR/profile}"
 RUN_ID="${HPC_JOB_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$BASHPID}"
-ARTIFACT_DIR="$ROOT_DIR/profile/gpu-$TOOL-$RUN_ID"
+ARTIFACT_DIR="$ARTIFACT_ROOT/gpu-$TOOL-$RUN_ID"
 PREP_ROOT="$ARTIFACT_DIR/prepare"
 BUILD_DIR="${AMSS_GPU_PROFILE_BUILD_DIR:-$ROOT_DIR/build-gpu-profile}"
 CACHE_DIR="$ROOT_DIR/profile/twopuncture-cache"
 PROFILE_TIME="${AMSS_PROFILE_TIME:-4.0}"
-mkdir -p "$ARTIFACT_DIR" "$PREP_ROOT" "$CACHE_DIR"
+mkdir -p "$ARTIFACT_ROOT" "$ARTIFACT_DIR" "$PREP_ROOT" "$CACHE_DIR"
 exec > >(tee "$ARTIFACT_DIR/job.log") 2>&1
 
 export JOBS="$(nproc)"
@@ -166,4 +167,13 @@ else
     echo "=== Correctness ==="
     ./check.sh "$RUN_DIR" | tee "$ARTIFACT_DIR/check.txt"
 fi
+
+if [[ "$TOOL" == "nsys" ]]; then
+    echo "=== Nsys summary ==="
+    cat "$ARTIFACT_DIR/nsys-stats.csv"
+elif [[ "$TOOL" == "vtune" ]]; then
+    echo "=== VTune summary ==="
+    cat "$ARTIFACT_DIR/vtune-summary.txt"
+fi
+
 echo "artifacts: $ARTIFACT_DIR"

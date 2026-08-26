@@ -23,8 +23,9 @@ fi
 cd "$ROOT_DIR"
 mkdir -p profile
 
+ARTIFACT_ROOT="${AMSS_BENCHMARK_ROOT:-$ROOT_DIR/profile}"
 RUN_ID="${HPC_JOB_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$BASHPID}"
-ARTIFACT_DIR="$ROOT_DIR/profile/gpu-benchmark-$RUN_ID"
+ARTIFACT_DIR="$ARTIFACT_ROOT/gpu-benchmark-$RUN_ID"
 WORK_ROOT="$ARTIFACT_DIR/work"
 RUNS="${AMSS_BENCHMARK_RUNS:-3}"
 BENCHMARK_TIME="${AMSS_BENCHMARK_TIME:-}"
@@ -32,7 +33,7 @@ if ! [[ "$RUNS" =~ ^[1-9][0-9]*$ ]]; then
     echo "AMSS_BENCHMARK_RUNS must be a positive integer" >&2
     exit 2
 fi
-mkdir -p "$ARTIFACT_DIR" "$WORK_ROOT"
+mkdir -p "$ARTIFACT_ROOT" "$ARTIFACT_DIR" "$WORK_ROOT"
 exec > >(tee "$ARTIFACT_DIR/job.log") 2>&1
 
 export JOBS="$(nproc)"
