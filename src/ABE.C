@@ -2,6 +2,15 @@
 #include <iomanip>
 #include <fstream>
 #include <cstdlib>
+#include <cerrno>
+#include <cstring>
+#ifdef __linux__
+#include <sched.h>
+#include <unistd.h>
+#endif
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 #include <cstdio>
 #include <string>
 #include <cmath>
@@ -17,6 +26,95 @@ using namespace std;
 #include "bssn_gpu_class.h"
 #else
 #include "bssn_class.h"
+
+#ifdef __linux__
+static int abe_affinity_cpu_count(const cpu_set_t &cpus)
+{
+      int count = 0;
+      for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu)
+            if (CPU_ISSET(cpu, &cpus))
+                  ++count;
+      return count;
+}
+
+static bool abe_parse_cpu_list(const char *text, cpu_set_t &cpus)
+{
+      CPU_ZERO(&cpus);
+      if (text == NULL || *text == '\0')
+            return false;
+      const char *cursor = text;
+      bool found_cpu = false;
+      while (*cursor != '\0')
+      {
+            errno = 0;
+            char *end = NULL;
+            long first = strtol(cursor, &end, 10);
+            if (errno != 0 || end == cursor || first < 0 || first >= CPU_SETSIZE)
+                  return false;
+            long last = first;
+            if (*end == '-')
+            {
+                  cursor = end + 1;
+                  errno = 0;
+                  last = strtol(cursor, &end, 10);
+                  if (errno != 0 || end == cursor || last < first || last >= CPU_SETSIZE)
+                        return false;
+            }
+            for (long cpu = first; cpu <= last; ++cpu)
+                  CPU_SET(cpu, &cpus);
+            found_cpu = true;
+            if (*end == '\0')
+                  break;
+            if (*end != ',')
+                  return false;
+            cursor = end + 1;
+      }
+      return found_cpu;
+}
+
+static void abe_restore_and_report_affinity(char *const argv[])
+{
+      cpu_set_t inherited;
+      cpu_set_t active;
+      const bool have_inherited = sched_getaffinity(0, sizeof(inherited), &inherited) == 0;
+      const char *requested = getenv("AMSS_SCHEDULER_CPU_LIST");
+      const char *restore_status = "not-requested";
+      int restore_errno = 0;
+      if (requested != NULL && *requested != '\0')
+      {
+            cpu_set_t target;
+            if (!abe_parse_cpu_list(requested, target))
+                  restore_status = "invalid-target";
+            else if (sched_setaffinity(0, sizeof(target), &target) != 0)
+            {
+                  restore_status = "failed";
+                  restore_errno = errno;
+            }
+            else
+                  restore_status = "ok";
+      }
+      if (strcmp(restore_status, "ok") == 0 &&
+          getenv("AMSS_AFFINITY_PREPARED") == NULL)
+      {
+            if (setenv("AMSS_AFFINITY_PREPARED", "1", 1) == 0)
+            {
+                  execv("/proc/self/exe", argv);
+                  restore_errno = errno;
+                  restore_status = "re-exec-failed";
+                  unsetenv("AMSS_AFFINITY_PREPARED");
+            }
+      }
+      const bool have_active = sched_getaffinity(0, sizeof(active), &active) == 0;
+      cout << "==> ABE affinity: inherited="
+           << (have_inherited ? abe_affinity_cpu_count(inherited) : -1)
+           << " target=" << ((requested != NULL && *requested != '\0') ? requested : "unset")
+           << " active=" << (have_active ? abe_affinity_cpu_count(active) : -1)
+           << " restore=" << restore_status;
+      if (restore_errno != 0)
+            cout << " errno=" << restore_errno << " (" << strerror(restore_errno) << ")";
+      cout << endl;
+}
+#endif
 #endif
 
 namespace parameters
@@ -32,9 +130,24 @@ namespace parameters
 int main(int argc, char *argv[])
 {
       int myrank = 0, nprocs = 1;
+#if defined(__linux__) && !defined(USE_GPU)
+      abe_restore_and_report_affinity(argv);
+#endif
       MPI_Init(&argc, &argv);
       MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
       MPI_Comm_rank(MPI_COMM_WORLD, &myrank);
+#ifdef _OPENMP
+      const int num_places = omp_get_num_places();
+      int place_cpus = 0;
+      for (int place = 0; place < num_places; ++place)
+            place_cpus += omp_get_place_num_procs(place);
+      if (myrank == 0)
+            cout << "==> ABE OpenMP: enabled=1 max_threads=" << omp_get_max_threads()
+                 << " places=" << num_places << " place_cpus=" << place_cpus << endl;
+#else
+      if (myrank == 0)
+            cout << "==> ABE OpenMP: enabled=0 max_threads=1" << endl;
+#endif
 
       double Begin_clock, End_clock;
       if (myrank == 0)

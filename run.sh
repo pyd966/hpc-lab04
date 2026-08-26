@@ -27,6 +27,22 @@ if [[ ! -f "$ROOT_DIR/CMakeLists.txt" && -f "$SCRIPT_DIR/CMakeLists.txt" ]]; the
 fi
 ROOT_DIR="$(cd -- "$ROOT_DIR" && pwd)"
 
+read_allowed_cpu_list() {
+  if [[ -r /proc/self/status ]]; then
+    awk '/^Cpus_allowed_list:/ { print $2; exit }' /proc/self/status
+  fi
+}
+
+# Preserve the scheduler cpuset before Python imports OpenMP-enabled libraries.
+inherited_cpu_list="$(read_allowed_cpu_list)"
+scheduler_cpu_list="${AMSS_SCHEDULER_CPU_LIST:-$inherited_cpu_list}"
+if [[ -z "$scheduler_cpu_list" ||
+      ! "$scheduler_cpu_list" =~ ^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$ ]]; then
+  echo "Invalid scheduler CPU list: ${scheduler_cpu_list:-empty}" >&2
+  exit 2
+fi
+export AMSS_SCHEDULER_CPU_LIST="$scheduler_cpu_list"
+
 file_digest() {
   local path="$1"
   if [[ ! -f "$path" ]]; then
@@ -150,8 +166,22 @@ if [[ "${1:-}" == "--amss-omp-launch" ]]; then
   echo "==> CPU launcher exe   : $executable"
   echo "==> CPU launcher PID   : $$"
   echo "==> CPU launcher OMP   : threads=${OMP_NUM_THREADS:-<unset>} places=${OMP_PLACES:-<unset>} bind=${OMP_PROC_BIND:-<unset>} schedule=${OMP_SCHEDULE:-<unset>} display=${OMP_DISPLAY_ENV:-<unset>}"
+  launcher_cpu_list="$(read_allowed_cpu_list)"
+  echo "==> CPU launcher affinity: inherited=${launcher_cpu_list:-unknown} target=${AMSS_SCHEDULER_CPU_LIST:-unknown}"
+  if [[ -n "${AMSS_SCHEDULER_CPU_LIST:-}" &&
+        "$launcher_cpu_list" != "$AMSS_SCHEDULER_CPU_LIST" ]]; then
+    if command -v taskset >/dev/null 2>&1; then
+      export AMSS_AFFINITY_PREPARED=1
+      exec taskset --cpu-list "$AMSS_SCHEDULER_CPU_LIST" "$executable" "$@"
+    fi
+    echo "Warning: taskset is unavailable; $executable will self-restore affinity" >&2
+  else
+    export AMSS_AFFINITY_PREPARED=1
+  fi
   exec "$executable" "$@"
 fi
+
+unset AMSS_AFFINITY_PREPARED
 
 # OJ executes this script directly. CPU OpenMP-only is therefore the default
 # execution mode; GPU workflows set AMSS_EXECUTION_MODE=gpu explicitly.
@@ -264,6 +294,7 @@ echo "==> Cache    : $AMSS_CACHE_DIR"
 echo "==> MPI exec : $AMSS_MPIEXEC"
 echo "==> Execution: $AMSS_EXECUTION_MODE"
 if [[ "$AMSS_EXECUTION_MODE" == "cpu" ]]; then
+  echo "==> CPU set  : inherited=${inherited_cpu_list:-unknown} restore=${AMSS_SCHEDULER_CPU_LIST:-unknown}"
   echo "==> OpenMP   : threads=$OMP_NUM_THREADS places=$OMP_PLACES bind=$OMP_PROC_BIND schedule=$OMP_SCHEDULE"
   echo "==> OMP work : static=$AMSS_OMP_STATIC_THREADS/$AMSS_OMP_STATIC_BLOCK_TARGET moving=$AMSS_OMP_MOVING_THREADS/$AMSS_OMP_MOVING_BLOCK_TARGET"
   print_submission_identity
