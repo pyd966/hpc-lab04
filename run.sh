@@ -8,10 +8,15 @@
 #   AMSS_MPIEXEC      MPI launcher          (default: mpiexec)
 set -euo pipefail
 
+# This marker is intentionally kept in an OJ-accepted file. It makes it
+# possible to identify the submitted CPU launch wrapper when the checkout has
+# no .git directory.
+CPU_ROUTE_MARKER="omp-only-launch-v2"
+
 # Ansorg-TwoPuncture allocates large Fortran automatic arrays.
 ulimit -s unlimited
 
-# Resolve the repository from the submission working directory.  hpc may run
+# Resolve the repository from the submission working directory. hpc may run
 # a copied script from /tmp, while the OJ invokes this file from the checkout;
 # AMSS_ROOT_DIR is exported below so the in-process launcher can be called
 # later from ABE's output directory.
@@ -22,10 +27,94 @@ if [[ ! -f "$ROOT_DIR/CMakeLists.txt" && -f "$SCRIPT_DIR/CMakeLists.txt" ]]; the
 fi
 ROOT_DIR="$(cd -- "$ROOT_DIR" && pwd)"
 
-# The OJ keeps its own Python launcher and does not collect scripts/*.py.  Its
-# launcher can still call `$AMSS_MPIEXEC ... ./ABE`; this small mode is a
-# built-in compatibility launcher that consumes the MPI-shaped arguments,
-# forwards env assignments, and executes the one OpenMP process directly.
+file_digest() {
+  local path="$1"
+  if [[ ! -f "$path" ]]; then
+    printf '%s' "missing"
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$path" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$path" | awk '{print $1}'
+  else
+    cksum "$path" | awk '{print $1 ":" $2}'
+  fi
+}
+
+print_submission_identity() {
+  local git_revision="unavailable"
+  local allowed_cpus="unavailable"
+  local online_cpus="unavailable"
+  if [[ -d "$ROOT_DIR/.git" ]] && command -v git >/dev/null 2>&1; then
+    git_revision="$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || printf '%s' unavailable)"
+  fi
+  if [[ -r /proc/self/status ]]; then
+    allowed_cpus="$(awk '/^Cpus_allowed_list:/ {print $2}' /proc/self/status 2>/dev/null || true)"
+    [[ -n "$allowed_cpus" ]] || allowed_cpus="unavailable"
+  fi
+  if command -v nproc >/dev/null 2>&1; then
+    online_cpus="$(nproc 2>/dev/null || printf '%s' unavailable)"
+  elif command -v getconf >/dev/null 2>&1; then
+    online_cpus="$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf '%s' unavailable)"
+  fi
+  echo "==> CPU route marker : $CPU_ROUTE_MARKER"
+  echo "==> Repository root   : $ROOT_DIR"
+  echo "==> Git revision      : $git_revision"
+  echo "==> run.sh sha256     : $(file_digest "$ROOT_DIR/run.sh")"
+  echo "==> CMakeLists sha256 : $(file_digest "$ROOT_DIR/CMakeLists.txt")"
+  echo "==> compile.sh sha256 : $(file_digest "$ROOT_DIR/compile.sh")"
+  if [[ -f "$ROOT_DIR/AMSS_NCKU_Input.py" ]]; then
+    echo "==> input sha256      : $(file_digest "$ROOT_DIR/AMSS_NCKU_Input.py")"
+  fi
+  echo "==> Host              : $(hostname 2>/dev/null || printf '%s' unavailable)"
+  echo "==> Online CPUs       : $online_cpus"
+  echo "==> Allowed CPU list  : $allowed_cpus"
+  echo "==> Process ID        : $$"
+}
+
+print_openmp_diagnostics() {
+  local cache_file="$AMSS_BUILD_DIR/CMakeCache.txt"
+  local key line
+  echo "==> Build flags"
+  for key in AMSS_ENABLE_GPU AMSS_ENABLE_OPENMP AMSS_ENABLE_OMP_ONLY \
+             AMSS_ENABLE_TWOPUNCTURE_OPENMP AMSS_OPT AMSS_TWOPUNCTURE_OPT \
+             CMAKE_CXX_COMPILER CMAKE_CXX_FLAGS; do
+    line="$(grep -E "^${key}(:|=)" "$cache_file" 2>/dev/null | head -n 1 || true)"
+    [[ -n "$line" ]] && echo "    $line"
+  done
+  if [[ -x "$AMSS_BUILD_DIR/ABE" ]]; then
+    echo "==> ABE binary       : $AMSS_BUILD_DIR/ABE"
+    if command -v file >/dev/null 2>&1; then
+      echo "==> ABE file          : $(file "$AMSS_BUILD_DIR/ABE")"
+    fi
+    if command -v ldd >/dev/null 2>&1; then
+      local dependencies
+      dependencies="$(ldd "$AMSS_BUILD_DIR/ABE" 2>&1 || true)"
+      if printf '%s\n' "$dependencies" | grep -Eq 'libgomp|libomp'; then
+        echo "==> OpenMP runtime    : $(printf '%s\n' "$dependencies" | grep -E 'libgomp|libomp' | tr '\n' ';')"
+      else
+        echo "==> OpenMP runtime    : not found by ldd (runtime may be static)"
+      fi
+      if printf '%s\n' "$dependencies" | grep -Eq 'libmpi|libopen-rte|libopen-pal'; then
+        echo "==> MPI runtime        : PRESENT ($(printf '%s\n' "$dependencies" | grep -E 'libmpi|libopen-rte|libopen-pal' | tr '\n' ';'))"
+      else
+        echo "==> MPI runtime        : absent from ABE dependencies"
+      fi
+    else
+      echo "==> Dynamic libraries  : ldd unavailable"
+    fi
+  fi
+  echo "==> OMP environment"
+  for key in OMP_NUM_THREADS OMP_DYNAMIC OMP_PROC_BIND OMP_PLACES OMP_SCHEDULE \
+             OMP_DISPLAY_ENV OMP_WAIT_POLICY AMSS_OMP_ONLY_RUN \
+             AMSS_OMP_STATIC_THREADS AMSS_OMP_MOVING_THREADS \
+             AMSS_OMP_STATIC_BLOCK_TARGET AMSS_OMP_MOVING_BLOCK_TARGET; do
+    printf '    %s=%s\n' "$key" "${!key-<unset>}"
+  done
+}
+
+# The OJ keeps its own Python launcher and does not collect scripts/*.py. Its
+# launcher can still call `$AMSS_MPIEXEC ... ./ABE`; this mode consumes the
+# MPI-shaped arguments and executes the one OpenMP process directly.
 if [[ "${1:-}" == "--amss-omp-launch" ]]; then
   shift
   executable=""
@@ -55,10 +144,16 @@ if [[ "${1:-}" == "--amss-omp-launch" ]]; then
     echo "CPU launcher could not find an executable in MPI-shaped command" >&2
     exit 2
   fi
+  echo "==> CPU launcher marker: $CPU_ROUTE_MARKER"
+  echo "==> CPU launcher mode  : direct OpenMP exec (MPI mapping bypassed)"
+  echo "==> CPU launcher cwd   : $PWD"
+  echo "==> CPU launcher exe   : $executable"
+  echo "==> CPU launcher PID   : $$"
+  echo "==> CPU launcher OMP   : threads=${OMP_NUM_THREADS:-<unset>} places=${OMP_PLACES:-<unset>} bind=${OMP_PROC_BIND:-<unset>} schedule=${OMP_SCHEDULE:-<unset>} display=${OMP_DISPLAY_ENV:-<unset>}"
   exec "$executable" "$@"
 fi
 
-# OJ executes this script directly.  CPU OpenMP-only is therefore the default
+# OJ executes this script directly. CPU OpenMP-only is therefore the default
 # execution mode; GPU workflows set AMSS_EXECUTION_MODE=gpu explicitly.
 AMSS_EXECUTION_MODE="${AMSS_EXECUTION_MODE:-cpu}"
 case "$AMSS_EXECUTION_MODE" in
@@ -68,7 +163,7 @@ esac
 export AMSS_EXECUTION_MODE AMSS_ROOT_DIR="$ROOT_DIR"
 
 if [[ "$AMSS_EXECUTION_MODE" == "cpu" ]]; then
-  # Count physical cores in the scheduler-provided cpuset.  Explicit
+  # Count physical cores in the scheduler-provided cpuset. Explicit
   # OMP_NUM_THREADS remains an escape hatch for profiling and sweeps.
   if [[ -x "$ROOT_DIR/scripts/count_available_physical_cores.sh" ]]; then
     detected_cores="$($ROOT_DIR/scripts/count_available_physical_cores.sh)"
@@ -88,6 +183,8 @@ if [[ "$AMSS_EXECUTION_MODE" == "cpu" ]]; then
   export OMP_PROC_BIND="${OMP_PROC_BIND:-close}"
   export OMP_SCHEDULE="${OMP_SCHEDULE:-dynamic,1}"
   export OMP_DYNAMIC="${OMP_DYNAMIC:-FALSE}"
+  # Ask the OpenMP runtime itself to echo the settings it actually consumes.
+  export OMP_DISPLAY_ENV="${OMP_DISPLAY_ENV:-TRUE}"
   export AMSS_OMP_ONLY_RUN=1
   export AMSS_OMP_STATIC_THREADS="${AMSS_OMP_STATIC_THREADS:-$static_threads}"
   export AMSS_OMP_MOVING_THREADS="${AMSS_OMP_MOVING_THREADS:-$OMP_NUM_THREADS}"
@@ -116,7 +213,7 @@ AMSS_BUILD_DIR="$(resolve_under_root "${AMSS_BUILD_DIR:-$ROOT_DIR/build}")"
 AMSS_OUTPUT_ROOT="$(resolve_under_root "${AMSS_OUTPUT_ROOT:-$ROOT_DIR}")"
 AMSS_CACHE_DIR="$(resolve_under_root "${AMSS_CACHE_DIR:-$ROOT_DIR/twopuncture_cache}")"
 if [[ "$AMSS_EXECUTION_MODE" == "cpu" ]]; then
-  # Override any scheduler-provided mpiexec command.  This is needed even
+  # Override any scheduler-provided mpiexec command. This is needed even
   # when the OJ's unsubmitted Python helper ignores AMSS_OMP_ONLY_RUN.
   AMSS_MPIEXEC="$ROOT_DIR/run.sh --amss-omp-launch"
 else
@@ -125,7 +222,7 @@ fi
 export AMSS_BUILD_DIR AMSS_OUTPUT_ROOT AMSS_CACHE_DIR AMSS_MPIEXEC
 
 if [[ "$AMSS_EXECUTION_MODE" == "cpu" ]]; then
-  # A direct OJ invocation may start from a clean checkout.  Reconfigure when
+  # A direct OJ invocation may start from a clean checkout. Reconfigure when
   # the selected build is missing or was compiled for GPU/MPI execution.
   cpu_build_ok=1
   cpu_cache="$AMSS_BUILD_DIR/CMakeCache.txt"
@@ -169,6 +266,8 @@ echo "==> Execution: $AMSS_EXECUTION_MODE"
 if [[ "$AMSS_EXECUTION_MODE" == "cpu" ]]; then
   echo "==> OpenMP   : threads=$OMP_NUM_THREADS places=$OMP_PLACES bind=$OMP_PROC_BIND schedule=$OMP_SCHEDULE"
   echo "==> OMP work : static=$AMSS_OMP_STATIC_THREADS/$AMSS_OMP_STATIC_BLOCK_TARGET moving=$AMSS_OMP_MOVING_THREADS/$AMSS_OMP_MOVING_BLOCK_TARGET"
+  print_submission_identity
+  print_openmp_diagnostics
 fi
 
 cd "$ROOT_DIR"
