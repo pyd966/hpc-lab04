@@ -482,6 +482,37 @@ lopsided 是重要的反例：虽然新循环生成了 SIMD，但它同时计算
 stencil，再根据 shift 符号选择，额外访存抵消了向量收益。说明“成功向量化”
 不等于“端到端一定加速”。
 
+全部 SIMD 实验完成后，以最后一个 fderivs SIMD 的同作业交错 A/B 作为阶段
+收口。两次 SIMD 运行分别为 37.9540 s 和 37.7792 s：
+
+| 指标 | SIMD 阶段最终值 |
+|---|---:|
+| 纯 Evolve，t=0..4 | 37.8666 s |
+| 全窗口平均 CPU | 17.139 / 30，即 57.1% |
+| IPC | 约 1.50 |
+| branch miss | 约 0.43% |
+| L1D miss | 约 4.18% |
+| LLC load miss | 约 48.83% |
+| dTLB miss | 约 3.07% |
+
+以开始 kodis SIMD 前的 scalar Evolve 43.0179 s 为阶段起点，最终 37.8666 s
+粗略累计下降约 12.0%。这四项 SIMD 不是在同一个长作业内做的一次总开关 A/B，
+因此 12.0% 只表示阶段端点变化；各函数的因果收益仍采用前表各自的交错 A/B，
+不能直接把 7.43%、3.0% 和 1.31% 相加。
+
+这里的平均 CPU 同样来自 perf stat 覆盖整个 ABE 进程，不是只对 Evolve 区间
+单独计数；37.8666 s 才是排除初始化后的纯 Evolve 时间。t=0..4 表示实际演化
+4 个时间单位、产生五个输出时刻。
+
+SIMD 阶段结束后的 flat profile 中，compute_rhs_bssn 为 49.56%，memcpy 9.57%，
+lopsided 7.80%，memset 6.43%，prolong3 4.65%，fdderivs 4.41%，fderivs
+2.37%。最后一项 fderivs 的 self samples 从 3.46% 降到 2.37%，与其 1.31%
+端到端收益一致。四个关键输出文件逐位一致，课程 checker 全部 PASS。
+
+这一阶段的独立 profile 作业平均频率只有约 2.46 GHz，因此其带采样 Evolve
+为 42.1702 s；该值只用于热点构成，性能数字采用上面的同节点交错 A/B，不能
+把不同频率作业直接比较。
+
 SIMD 之后，分支 miss 仍约 0.5%，不是问题；RHS 总体、memcpy/memset 和 AMR
 transfer 的占比相对上升。下一步因此不是继续随意加 SIMD pragma，而是减少
 数组搬运并提高缓存局部性。
@@ -579,7 +610,21 @@ RHS/RK4 融合没有实施：RHS 需要跨 RK stage 保存，而 RK routine 只�
 
 ### 4.6 ABE 优化主线总结
 
-从 profile 的变化看，ABE 的优化顺序是连贯的：
+为了把“按方法归类的章节”与“当时实际实验顺序”区分开，下面给出累计版本的
+历史顺序。OpenMP 调度在 SIMD 之后又进行过一轮，所以 4.2 节的 29.878 s
+已经包含此前接受的 SIMD；不能把它与 4.3 节的 37.8666 s 按章节顺序相减。
+
+| 实际实验节点 | 纯 Evolve t=0..4 | 当时解决的主要问题 |
+|---|---:|---|
+| 最初 MPI baseline | 173.669 s | 起点 |
+| 完成 block/transfer OpenMP 转换 | 61.477 s | 恢复原 rank 隐含的并行工作 |
+| 点级 AnalysisStuff OpenMP | 43.869 s | 删除大 Allreduce 和分析负载不均衡 |
+| 全部 stencil SIMD 完成 | 37.867 s | 向量化 kodis、fdderivs、fderivs |
+| constraint 并行和 OMP 几何校准完成 | 29.878 s | 补齐串行区并确定 24/30 block |
+| 最终版本短程 profile | 26.538 s | 再加入内存访问和 RHS 局部性优化 |
+
+不同节点频率和后期 regrid 会影响绝对值，因此这张表用于展示优化过程，不代替
+每一项同作业交错 A/B。按 profile 的瓶颈转移看，方法链仍然是：
 
 | 阶段 | profile 判断 | 采用的方法 | 瓶颈转移 |
 |---|---|---|---|
