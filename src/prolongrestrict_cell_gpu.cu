@@ -305,8 +305,85 @@ __device__ void d_restrict3_device(
     int out_idx = get_col_major_idx(i, j, k, extc[0], extc[1], extc[2]);
     func[out_idx] = final_val;
 }
+__device__ __forceinline__ double d_symmetry_bd_scalar(
+    int ord, int nx, int ny, int nz, const double* func,
+    int i1b, int j1b, int k1b, const double SoA[3]
+);
+
+__device__ void d_prolong3_precomputed(
+    int i, int j, int k,
+    int lbc0, int lbc1, int lbc2, int lbf0, int lbf1, int lbf2,
+    int cnx, int cny, int cnz, const double* func,
+    int fnx, int fny, int fnz, double* funf, const double SoA[3]
+) {
+    int i1b = i + 1, j1b = j + 1, k1b = k + 1;
+    int ii = i + lbf0, jj = j + lbf1, kk = k + lbf2;
+    int cxI_i = (i1b + lbf0 - 1) / 2 - lbc0 + 1;
+    int cxI_j = (j1b + lbf1 - 1) / 2 - lbc1 + 1;
+    int cxI_k = (k1b + lbf2 - 1) / 2 - lbc2 + 1;
+    bool k_even = ((kk / 2) * 2 == kk);
+    bool j_even = ((jj / 2) * 2 == jj);
+    bool i_even = ((ii / 2) * 2 == ii);
+    double tmp2[6][6];
+    double tmp1[6];
+    for (int m = 0; m < 6; ++m) {
+        for (int n = 0; n < 6; ++n) {
+            int cur_ic = cxI_i - 2 + n;
+            int cur_jc = cxI_j - 2 + m;
+            double val = 0.0;
+            if (k_even) {
+                val += C_PROLONG[0] * d_symmetry_bd_scalar(3, cnx, cny, cnz, func, cur_ic, cur_jc, cxI_k - 2, SoA);
+                val += C_PROLONG[1] * d_symmetry_bd_scalar(3, cnx, cny, cnz, func, cur_ic, cur_jc, cxI_k - 1, SoA);
+                val += C_PROLONG[2] * d_symmetry_bd_scalar(3, cnx, cny, cnz, func, cur_ic, cur_jc, cxI_k, SoA);
+                val += C_PROLONG[3] * d_symmetry_bd_scalar(3, cnx, cny, cnz, func, cur_ic, cur_jc, cxI_k + 1, SoA);
+                val += C_PROLONG[4] * d_symmetry_bd_scalar(3, cnx, cny, cnz, func, cur_ic, cur_jc, cxI_k + 2, SoA);
+                val += C_PROLONG[5] * d_symmetry_bd_scalar(3, cnx, cny, cnz, func, cur_ic, cur_jc, cxI_k + 3, SoA);
+            } else {
+                val += C_PROLONG[5] * d_symmetry_bd_scalar(3, cnx, cny, cnz, func, cur_ic, cur_jc, cxI_k - 2, SoA);
+                val += C_PROLONG[4] * d_symmetry_bd_scalar(3, cnx, cny, cnz, func, cur_ic, cur_jc, cxI_k - 1, SoA);
+                val += C_PROLONG[3] * d_symmetry_bd_scalar(3, cnx, cny, cnz, func, cur_ic, cur_jc, cxI_k, SoA);
+                val += C_PROLONG[2] * d_symmetry_bd_scalar(3, cnx, cny, cnz, func, cur_ic, cur_jc, cxI_k + 1, SoA);
+                val += C_PROLONG[1] * d_symmetry_bd_scalar(3, cnx, cny, cnz, func, cur_ic, cur_jc, cxI_k + 2, SoA);
+                val += C_PROLONG[0] * d_symmetry_bd_scalar(3, cnx, cny, cnz, func, cur_ic, cur_jc, cxI_k + 3, SoA);
+            }
+            tmp2[m][n] = val;
+        }
+    }
+    for (int n = 0; n < 6; ++n) {
+        double val = 0.0;
+        if (j_even) {
+            val += C_PROLONG[0] * tmp2[0][n] + C_PROLONG[1] * tmp2[1][n] + C_PROLONG[2] * tmp2[2][n] + C_PROLONG[3] * tmp2[3][n] + C_PROLONG[4] * tmp2[4][n] + C_PROLONG[5] * tmp2[5][n];
+        } else {
+            val += C_PROLONG[5] * tmp2[0][n] + C_PROLONG[4] * tmp2[1][n] + C_PROLONG[3] * tmp2[2][n] + C_PROLONG[2] * tmp2[3][n] + C_PROLONG[1] * tmp2[4][n] + C_PROLONG[0] * tmp2[5][n];
+        }
+        tmp1[n] = val;
+    }
+    double final_val = 0.0;
+    if (i_even) {
+        final_val += C_PROLONG[0] * tmp1[0] + C_PROLONG[1] * tmp1[1] + C_PROLONG[2] * tmp1[2] + C_PROLONG[3] * tmp1[3] + C_PROLONG[4] * tmp1[4] + C_PROLONG[5] * tmp1[5];
+    } else {
+        final_val += C_PROLONG[5] * tmp1[0] + C_PROLONG[4] * tmp1[1] + C_PROLONG[3] * tmp1[2] + C_PROLONG[2] * tmp1[3] + C_PROLONG[1] * tmp1[4] + C_PROLONG[0] * tmp1[5];
+    }
+    funf[k * (fnx * fny) + j * fnx + i] = final_val;
+}
 
 // ++++++++++++++ Kernel Implementation ++++++++++++++
+// Batch kernels use scalar geometry metadata prepared by the host.
+__device__ __forceinline__ double d_symmetry_bd_scalar(
+    int ord, int nx, int ny, int nz, const double* func,
+    int i1b, int j1b, int k1b, const double SoA[3]
+) {
+    if (i1b < -ord + 1 || i1b > nx) return 0.0;
+    if (j1b < -ord + 1 || j1b > ny) return 0.0;
+    if (k1b < -ord + 1 || k1b > nz) return 0.0;
+    int ii = i1b, jj = j1b, kk = k1b;
+    double factor = 1.0;
+    if (ii <= 0) { ii = 1 - ii; factor *= SoA[0]; }
+    if (jj <= 0) { jj = 1 - jj; factor *= SoA[1]; }
+    if (kk <= 0) { kk = 1 - kk; factor *= SoA[2]; }
+    if (ii < 1 || ii > nx || jj < 1 || jj > ny || kk < 1 || kk > nz) return 0.0;
+    return func[(kk - 1) * (nx * ny) + (jj - 1) * nx + (ii - 1)] * factor;
+}
 // ---------------------------------------------------------
 // 1. 直接面向显存的单任务 Prolong Kernel
 // ---------------------------------------------------------
@@ -414,6 +491,95 @@ __global__ void restrict3_kernel(
         arr_llbf, arr_uubf, arr_extf, d_src_f,
         arr_llbt, arr_uubt,
         arr_SoA, Symmetry
+    );
+}
+
+// Batched variants keep the original per-variable interpolation arithmetic,
+// but map variables to grid.y so one launch covers a complete AMR segment.
+// The descriptor table is persistent and is populated by gpu_data_packer.
+__global__ void prolong3_batch_kernel(
+    int ni, int nj, int nk,
+    int i_start, int j_start, int k_start,
+    double llbc0, double llbc1, double llbc2,
+    double uubc0, double uubc1, double uubc2,
+    int extc0, int extc1, int extc2,
+    double llbf0, double llbf1, double llbf2,
+    double uubf0, double uubf1, double uubf2,
+    int extf0, int extf1, int extf2,
+    int lbc0, int lbc1, int lbc2,
+    int lbf0, int lbf1, int lbf2,
+    double llbt0, double llbt1, double llbt2,
+    double uubt0, double uubt1, double uubt2,
+    const Prolong3BatchVar* __restrict__ vars,
+    int nvars,
+    int Symmetry
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int var = blockIdx.y;
+    int total = ni * nj * nk;
+    if (idx >= total || var >= nvars) return;
+
+    int k_local = idx / (ni * nj);
+    int rem     = idx % (ni * nj);
+    int j_local = rem / ni;
+    int i_local = rem % ni;
+    int i = i_start + i_local;
+    int j = j_start + j_local;
+    int k = k_start + k_local;
+
+
+    Prolong3BatchVar v = vars[var];
+    d_prolong3_precomputed(
+        i, j, k, lbc0, lbc1, lbc2, lbf0, lbf1, lbf2,
+        extc0, extc1, extc2, v.d_src,
+        extf0, extf1, extf2, v.d_dst, v.SoA
+    );
+}
+
+__global__ void restrict3_batch_kernel(
+    int ni, int nj, int nk,
+    int i_start, int j_start, int k_start,
+    double llbc0, double llbc1, double llbc2,
+    double uubc0, double uubc1, double uubc2,
+    int extc0, int extc1, int extc2,
+    double llbf0, double llbf1, double llbf2,
+    double uubf0, double uubf1, double uubf2,
+    int extf0, int extf1, int extf2,
+    double llbt0, double llbt1, double llbt2,
+    double uubt0, double uubt1, double uubt2,
+    const Prolong3BatchVar* __restrict__ vars,
+    int nvars,
+    int Symmetry
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int var = blockIdx.y;
+    int total = ni * nj * nk;
+    if (idx >= total || var >= nvars) return;
+
+    int k_local = idx / (ni * nj);
+    int rem     = idx % (ni * nj);
+    int j_local = rem / ni;
+    int i_local = rem % ni;
+    int i = i_start + i_local;
+    int j = j_start + j_local;
+    int k = k_start + k_local;
+
+    double arr_llbc[3] = {llbc0, llbc1, llbc2};
+    double arr_uubc[3] = {uubc0, uubc1, uubc2};
+    int    arr_extc[3] = {extc0, extc1, extc2};
+    double arr_llbf[3] = {llbf0, llbf1, llbf2};
+    double arr_uubf[3] = {uubf0, uubf1, uubf2};
+    int    arr_extf[3] = {extf0, extf1, extf2};
+    double arr_llbt[3] = {llbt0, llbt1, llbt2};
+    double arr_uubt[3] = {uubt0, uubt1, uubt2};
+
+    Prolong3BatchVar v = vars[var];
+    d_restrict3_device(
+        i, j, k,
+        arr_llbc, arr_uubc, arr_extc, v.d_dst,
+        arr_llbf, arr_uubf, arr_extf, v.d_src,
+        arr_llbt, arr_uubt,
+        v.SoA, Symmetry
     );
 }
 
@@ -537,5 +703,106 @@ void gpu_restrict3_launch(
         uubt[0], uubt[1], uubt[2],
         SoA[0], SoA[1], SoA[2],
         Symmetry
+    );
+}
+
+void gpu_prolong3_batch_launch(
+    cudaStream_t stream,
+    const Prolong3BatchVar *d_vars, int nvars,
+    const double* llbc, const double* uubc, const int* extc,
+    const double* llbf, const double* uubf, const int* extf,
+    const double* llbt, const double* uubt,
+    int Symmetry
+) {
+    if (!d_vars || nvars <= 0) return;
+
+    double CD[3], FD[3], base[3];
+    for (int d = 0; d < 3; ++d) {
+        CD[d] = (uubc[d] - llbc[d]) / (double)extc[d];
+        FD[d] = (uubf[d] - llbf[d]) / (double)extf[d];
+        if (llbc[d] <= llbf[d]) {
+            base[d] = llbc[d];
+        } else {
+            int j_val = (int)std::trunc((llbc[d] - llbf[d]) / FD[d] + 0.4);
+            base[d] = ((j_val / 2) * 2 == j_val) ? llbf[d] : llbf[d] - CD[d] / 2.0;
+        }
+    }
+
+    int starts[3], ends[3], lbc[3], lbf[3];
+    for (int d = 0; d < 3; ++d) {
+        int lbp = (int)std::trunc((llbt[d] - base[d]) / FD[d] + 0.4) + 1;
+        int ubp = (int)std::trunc((uubt[d] - base[d]) / FD[d] + 0.4);
+        lbf[d] = (int)std::trunc((llbf[d] - base[d]) / FD[d] + 0.4) + 1;
+        lbc[d] = (int)std::trunc((llbc[d] - base[d]) / CD[d] + 0.4) + 1;
+        starts[d] = lbp - lbf[d];
+        ends[d] = ubp - lbf[d];
+    }
+    int ni = ends[0] - starts[0] + 1;
+    int nj = ends[1] - starts[1] + 1;
+    int nk = ends[2] - starts[2] + 1;
+    if (ni <= 0 || nj <= 0 || nk <= 0) return;
+
+    int block = 256;
+    int grid = (ni * nj * nk + block - 1) / block;
+    dim3 blocks(grid, nvars, 1);
+    prolong3_batch_kernel<<<blocks, block, 0, stream>>>(
+        ni, nj, nk, starts[0], starts[1], starts[2],
+        llbc[0], llbc[1], llbc[2], uubc[0], uubc[1], uubc[2],
+        extc[0], extc[1], extc[2],
+        llbf[0], llbf[1], llbf[2], uubf[0], uubf[1], uubf[2],
+        extf[0], extf[1], extf[2],
+        lbc[0], lbc[1], lbc[2],
+        lbf[0], lbf[1], lbf[2],
+        llbt[0], llbt[1], llbt[2], uubt[0], uubt[1], uubt[2],
+        d_vars, nvars, Symmetry
+    );
+}
+
+void gpu_restrict3_batch_launch(
+    cudaStream_t stream,
+    const Prolong3BatchVar *d_vars, int nvars,
+    const double* llbc, const double* uubc, const int* extc,
+    const double* llbf, const double* uubf, const int* extf,
+    const double* llbt, const double* uubt,
+    int Symmetry
+) {
+    if (!d_vars || nvars <= 0) return;
+
+    double CD[3], FD[3], base[3];
+    for (int d = 0; d < 3; ++d) {
+        CD[d] = (uubc[d] - llbc[d]) / (double)extc[d];
+        FD[d] = (uubf[d] - llbf[d]) / (double)extf[d];
+        if (llbc[d] <= llbf[d]) {
+            base[d] = llbc[d];
+        } else {
+            int j_val = (int)std::trunc((llbc[d] - llbf[d]) / FD[d] + 0.4);
+            base[d] = ((j_val / 2) * 2 == j_val) ? llbf[d] : llbf[d] - CD[d] / 2.0;
+        }
+    }
+
+    int starts[3], ends[3];
+    for (int d = 0; d < 3; ++d) {
+        int lbr = (int)std::trunc((llbt[d] - base[d]) / CD[d] + 0.4) + 1;
+        int ubr = (int)std::trunc((uubt[d] - base[d]) / CD[d] + 0.4);
+        int lbc = (int)std::trunc((llbc[d] - base[d]) / CD[d] + 0.4) + 1;
+        starts[d] = lbr - lbc;
+        ends[d] = ubr - lbc;
+    }
+    int ni = ends[0] - starts[0] + 1;
+    int nj = ends[1] - starts[1] + 1;
+    int nk = ends[2] - starts[2] + 1;
+    if (ni <= 0 || nj <= 0 || nk <= 0) return;
+
+    int block = 256;
+    int grid = (ni * nj * nk + block - 1) / block;
+    dim3 blocks(grid, nvars, 1);
+    restrict3_batch_kernel<<<blocks, block, 0, stream>>>(
+        ni, nj, nk, starts[0], starts[1], starts[2],
+        llbc[0], llbc[1], llbc[2], uubc[0], uubc[1], uubc[2],
+        extc[0], extc[1], extc[2],
+        llbf[0], llbf[1], llbf[2], uubf[0], uubf[1], uubf[2],
+        extf[0], extf[1], extf[2],
+        llbt[0], llbt[1], llbt[2], uubt[0], uubt[1], uubt[2],
+        d_vars, nvars, Symmetry
     );
 }

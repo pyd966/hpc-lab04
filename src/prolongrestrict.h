@@ -54,6 +54,15 @@ extern "C"
 
 #ifdef USE_GPU
 #include <cuda_runtime.h>
+
+// One descriptor is used by a batched AMR launch. Variables in a segment
+// have disjoint source fields and disjoint packed destinations.
+struct Prolong3BatchVar {
+	const double *d_src;
+	double *d_dst;
+	double SoA[3];
+};
+
 __device__ int d_idint(double a);
 
 __device__ void d_prolong3_device(
@@ -88,6 +97,24 @@ void gpu_restrict3_launch(
     const double* llbf, const double* uubf, const int* extf,
     const double* llbt, const double* uubt,
     const double* SoA, int Symmetry
+);
+
+void gpu_prolong3_batch_launch(
+	cudaStream_t stream,
+	const Prolong3BatchVar *d_vars, int nvars,
+	const double* llbc, const double* uubc, const int* extc,
+	const double* llbf, const double* uubf, const int* extf,
+	const double* llbt, const double* uubt,
+	int Symmetry
+);
+
+void gpu_restrict3_batch_launch(
+	cudaStream_t stream,
+	const Prolong3BatchVar *d_vars, int nvars,
+	const double* llbc, const double* uubc, const int* extc,
+	const double* llbf, const double* uubf, const int* extf,
+	const double* llbt, const double* uubt,
+	int Symmetry
 );
 #endif
 

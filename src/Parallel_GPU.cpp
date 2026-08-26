@@ -61,6 +61,104 @@ int Parallel::gpu_data_packer(
     else if (src->data->Bg->lev > dst->data->Bg->lev) type = 2;
     else type = 3;
     
+
+    // AMR interpolation/restriction for one segment has identical geometry
+    // for every variable. Collect the independent source/destination fields
+    // first, then issue one 2-D (point, variable) launch per segment. This
+    // keeps the existing transfer ordering and packed layout unchanged.
+    int batch_var_count = 0;
+    for (MyList<var> *v = VarLists; v; v = v->next) ++batch_var_count;
+    if (d_data && dir == PACK && batch_var_count > 1 && (type == 2 || type == 3)) {
+        struct BatchSegment {
+            gridseg *src;
+            gridseg *dst;
+            std::size_t var_offset;
+        };
+
+        std::vector<Prolong3BatchVar> host_vars;
+        std::vector<BatchSegment> segments;
+        host_vars.reserve(static_cast<std::size_t>(batch_var_count) * 16);
+        segments.reserve(16);
+
+        MyList<gridseg> *src_it = src;
+        MyList<gridseg> *dst_it = dst;
+        while (src_it && dst_it) {
+            gridseg *src_seg = src_it->data;
+            gridseg *dst_seg = dst_it->data;
+            bool owns_segment =
+                (dst_seg->Bg->rank == rank_in && src_seg->Bg->rank == myrank);
+            if (owns_segment) {
+                std::size_t segment_points =
+                    static_cast<std::size_t>(dst_seg->shape[0]) *
+                    static_cast<std::size_t>(dst_seg->shape[1]) *
+                    static_cast<std::size_t>(dst_seg->shape[2]);
+                std::size_t var_offset = host_vars.size();
+                int variable_index = 0;
+                MyList<var> *vsrc = VarLists;
+                MyList<var> *vdst = VarListd;
+                while (vsrc && vdst) {
+                    Prolong3BatchVar descriptor{};
+                    descriptor.d_src = src_seg->Bg->d_fgfs[vsrc->data->sgfn];
+                    descriptor.d_dst = d_data + size_out +
+                        static_cast<std::size_t>(variable_index) * segment_points;
+                    descriptor.SoA[0] = vsrc->data->SoA[0];
+                    descriptor.SoA[1] = vsrc->data->SoA[1];
+                    descriptor.SoA[2] = vsrc->data->SoA[2];
+                    host_vars.push_back(descriptor);
+                    ++variable_index;
+                    vsrc = vsrc->next;
+                    vdst = vdst->next;
+                }
+                segments.push_back({src_seg, dst_seg, var_offset});
+                size_out += static_cast<int>(segment_points *
+                                             static_cast<std::size_t>(batch_var_count));
+            }
+            src_it = src_it->next;
+            dst_it = dst_it->next;
+        }
+
+        if (!host_vars.empty()) {
+            Prolong3BatchVar *d_vars =
+                GPUManager::getInstance().acquire_prolong3_batch_vars(host_vars.size());
+            CUDA_CHECK(cudaMemcpy(
+                d_vars, host_vars.data(),
+                host_vars.size() * sizeof(Prolong3BatchVar),
+                cudaMemcpyHostToDevice
+            ));
+
+            for (const BatchSegment &segment : segments) {
+                cudaStream_t stream = segment.src->Bg->stream;
+                if (type == 3) {
+                    gpu_prolong3_batch_launch(
+                        stream,
+                        d_vars + segment.var_offset, batch_var_count,
+                        segment.src->Bg->bbox, segment.src->Bg->bbox + dim,
+                        segment.src->Bg->shape,
+                        segment.dst->llb, segment.dst->uub, segment.dst->shape,
+                        segment.dst->llb, segment.dst->uub,
+                        Symmetry
+                    );
+                } else {
+                    gpu_restrict3_batch_launch(
+                        stream,
+                        d_vars + segment.var_offset, batch_var_count,
+                        segment.dst->llb, segment.dst->uub,
+                        segment.dst->shape,
+                        segment.src->Bg->bbox, segment.src->Bg->bbox + dim,
+                        segment.src->Bg->shape,
+                        segment.dst->llb, segment.dst->uub,
+                        Symmetry
+                    );
+                }
+                touch_stream(stream);
+            }
+        }
+
+        GPUManager::getInstance().synchronize_streams(
+            touched_streams.data(), touched_streams.size()
+        );
+        return size_out;
+    }
     while (src && dst) {
         if (
             (dir == PACK && dst->data->Bg->rank == rank_in && src->data->Bg->rank == myrank) ||

@@ -1,4 +1,5 @@
 #include "gpu_manager.h"
+#include "prolongrestrict.h"
 #include <algorithm>
 #include <vector>
 #include <unordered_map>
@@ -19,6 +20,8 @@ struct GPUManager::Impl {
     cudaEvent_t fork_events[NUM_STREAMS];
     cudaEvent_t join_events[NUM_STREAMS][AUX_STREAMS_PER_PARENT];
     std::atomic<unsigned int> stream_idx{0};
+    Prolong3BatchVar* prolong_batch_vars = nullptr;
+    size_t prolong_batch_capacity = 0;
 };
 
 // 单例获取
@@ -43,6 +46,7 @@ GPUManager::GPUManager() : pimpl(new Impl()) {
 
 GPUManager::~GPUManager() {
     clear_pool();
+    if (pimpl->prolong_batch_vars) cudaFree(pimpl->prolong_batch_vars);
     for (int i = 0; i < Impl::NUM_STREAMS; ++i) {
         cudaEventDestroy(pimpl->fork_events[i]);
         for (int j = 0; j < Impl::AUX_STREAMS_PER_PARENT; ++j) {
@@ -85,6 +89,22 @@ void GPUManager::clear_pool() {
     //     }
     // }
     pimpl->memory_pool.clear();
+}
+
+Prolong3BatchVar* GPUManager::acquire_prolong3_batch_vars(size_t count) {
+    if (count == 0) return nullptr;
+    if (count > pimpl->prolong_batch_capacity) {
+        if (pimpl->prolong_batch_vars) {
+            CUDA_CHECK(cudaFree(pimpl->prolong_batch_vars));
+            pimpl->prolong_batch_vars = nullptr;
+        }
+        CUDA_CHECK(cudaMalloc(
+            (void**)&pimpl->prolong_batch_vars,
+            count * sizeof(Prolong3BatchVar)
+        ));
+        pimpl->prolong_batch_capacity = count;
+    }
+    return pimpl->prolong_batch_vars;
 }
 
 cudaStream_t GPUManager::get_stream() {

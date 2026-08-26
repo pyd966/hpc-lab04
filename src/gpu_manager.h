@@ -5,6 +5,8 @@
 #include <cstddef>
 #include <cuda_runtime.h>
 
+struct Prolong3BatchVar;
+
 #define CUDA_CHECK(call) \
     do { \
         cudaError_t err = (call); \
@@ -30,6 +32,10 @@ public:
     double* allocate_device_memory(size_t num_elements);
     void free_device_memory(double* d_ptr, size_t num_elements);
     void clear_pool();
+
+    // Persistent metadata storage for AMR cross-variable batching. The
+    // buffer is reused only after the caller's stream work is synchronized.
+    Prolong3BatchVar* acquire_prolong3_batch_vars(size_t count);
 
     static void sync_to_gpu(const double* h_ptr, double* d_ptr, size_t num_elements);
     static void sync_to_cpu(double* h_ptr, const double* d_ptr, size_t num_elements);
