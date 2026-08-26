@@ -1,4 +1,5 @@
 #include "gpu_manager.h"
+#include <algorithm>
 #include <vector>
 #include <unordered_map>
 #include <mutex>
@@ -13,6 +14,10 @@ struct GPUManager::Impl {
 
     static constexpr int NUM_STREAMS = 4; // 强烈建议开多个流以支持并发
     cudaStream_t stream_pool[NUM_STREAMS];
+    static constexpr int AUX_STREAMS_PER_PARENT = 2;
+    cudaStream_t aux_stream_pool[NUM_STREAMS][AUX_STREAMS_PER_PARENT];
+    cudaEvent_t fork_events[NUM_STREAMS];
+    cudaEvent_t join_events[NUM_STREAMS][AUX_STREAMS_PER_PARENT];
     std::atomic<unsigned int> stream_idx{0};
 };
 
@@ -26,12 +31,24 @@ GPUManager& GPUManager::getInstance() {
 GPUManager::GPUManager() : pimpl(new Impl()) {
     for (int i = 0; i < Impl::NUM_STREAMS; ++i) {
         CUDA_CHECK(cudaStreamCreate(&pimpl->stream_pool[i]));
+        CUDA_CHECK(cudaEventCreateWithFlags(&pimpl->fork_events[i], cudaEventDisableTiming));
+        for (int j = 0; j < Impl::AUX_STREAMS_PER_PARENT; ++j) {
+            CUDA_CHECK(cudaStreamCreate(&pimpl->aux_stream_pool[i][j]));
+            CUDA_CHECK(cudaEventCreateWithFlags(
+                &pimpl->join_events[i][j], cudaEventDisableTiming
+            ));
+        }
     }
 }
 
 GPUManager::~GPUManager() {
     clear_pool();
     for (int i = 0; i < Impl::NUM_STREAMS; ++i) {
+        cudaEventDestroy(pimpl->fork_events[i]);
+        for (int j = 0; j < Impl::AUX_STREAMS_PER_PARENT; ++j) {
+            cudaEventDestroy(pimpl->join_events[i][j]);
+            cudaStreamDestroy(pimpl->aux_stream_pool[i][j]);
+        }
         cudaStreamDestroy(pimpl->stream_pool[i]);
     }
     delete pimpl;
@@ -73,6 +90,56 @@ void GPUManager::clear_pool() {
 cudaStream_t GPUManager::get_stream() {
     unsigned int cur = pimpl->stream_idx.fetch_add(1);
     return pimpl->stream_pool[cur % Impl::NUM_STREAMS];
+}
+
+std::size_t GPUManager::fork_aux_streams(
+    cudaStream_t parent, cudaStream_t* aux_streams, std::size_t capacity
+) {
+    if (!aux_streams || capacity == 0) return 0;
+
+    int parent_index = -1;
+    for (int i = 0; i < Impl::NUM_STREAMS; ++i) {
+        if (pimpl->stream_pool[i] == parent) {
+            parent_index = i;
+            break;
+        }
+    }
+    if (parent_index < 0) return 0;
+
+    const std::size_t count = std::min(
+        capacity, static_cast<std::size_t>(Impl::AUX_STREAMS_PER_PARENT)
+    );
+    CUDA_CHECK(cudaEventRecord(pimpl->fork_events[parent_index], parent));
+    for (std::size_t i = 0; i < count; ++i) {
+        aux_streams[i] = pimpl->aux_stream_pool[parent_index][i];
+        CUDA_CHECK(cudaStreamWaitEvent(
+            aux_streams[i], pimpl->fork_events[parent_index], 0
+        ));
+    }
+    return count;
+}
+
+void GPUManager::join_aux_streams(
+    cudaStream_t parent, const cudaStream_t* aux_streams, std::size_t count
+) {
+    if (!aux_streams || count == 0) return;
+
+    int parent_index = -1;
+    for (int i = 0; i < Impl::NUM_STREAMS; ++i) {
+        if (pimpl->stream_pool[i] == parent) {
+            parent_index = i;
+            break;
+        }
+    }
+    if (parent_index < 0) return;
+
+    const std::size_t joined = std::min(
+        count, static_cast<std::size_t>(Impl::AUX_STREAMS_PER_PARENT)
+    );
+    for (std::size_t i = 0; i < joined; ++i) {
+        CUDA_CHECK(cudaEventRecord(pimpl->join_events[parent_index][i], aux_streams[i]));
+        CUDA_CHECK(cudaStreamWaitEvent(parent, pimpl->join_events[parent_index][i], 0));
+    }
 }
 
 void GPUManager::synchronize_all() {

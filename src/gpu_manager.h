@@ -35,6 +35,12 @@ public:
     static void sync_to_cpu(double* h_ptr, const double* d_ptr, size_t num_elements);
 
     cudaStream_t get_stream();
+    std::size_t fork_aux_streams(
+        cudaStream_t parent, cudaStream_t* aux_streams, std::size_t capacity
+    );
+    void join_aux_streams(
+        cudaStream_t parent, const cudaStream_t* aux_streams, std::size_t count
+    );
     void synchronize_all();
     void synchronize_streams(const cudaStream_t* streams, std::size_t count);
 };

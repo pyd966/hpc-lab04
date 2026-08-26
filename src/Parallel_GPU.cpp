@@ -11,6 +11,7 @@
 #include "helper.h"
 
 #include <algorithm>
+#include <array>
 #include <vector>
 
 int Parallel::gpu_data_packer(
@@ -67,11 +68,28 @@ int Parallel::gpu_data_packer(
         ) {
             varls = VarLists;
             varld = VarListd;
+            int variable_index = 0;
+            std::array<cudaStream_t, 2> aux_streams{};
+            std::size_t aux_count = 0;
+            cudaStream_t parent_stream = src->data->Bg->stream;
+            // Prolong variables write disjoint packed ranges. Rejoin the
+            // parent before the existing staging/unpack dependency boundary.
+            if (d_data && dir == PACK && type == 3 && VarLists && VarLists->next) {
+                aux_count = GPUManager::getInstance().fork_aux_streams(
+                    parent_stream, aux_streams.data(), aux_streams.size()
+                );
+            }
             while (varls && varld) {
                 if (d_data) {
                     if (dir == PACK) {
                         double* d_dst_ptr = d_data + size_out; 
                         double* d_src_ptr = src->data->Bg->d_fgfs[varls->data->sgfn];
+                        cudaStream_t operation_stream = parent_stream;
+                        if (aux_count > 0 && variable_index % (aux_count + 1) != 0) {
+                            operation_stream = aux_streams[
+                                variable_index % (aux_count + 1) - 1
+                            ];
+                        }
 
                         switch (type) {
                         case 1: {
@@ -110,7 +128,7 @@ int Parallel::gpu_data_packer(
 
                         case 3: {
                             gpu_prolong3_launch(
-                                src->data->Bg->stream,
+                                operation_stream,
                                 d_src_ptr, d_dst_ptr, // src_c, dst_f
                                 src->data->Bg->bbox, src->data->Bg->bbox + dim, src->data->Bg->shape, 
                                 dst->data->llb, dst->data->uub, dst->data->shape,        
@@ -147,8 +165,15 @@ int Parallel::gpu_data_packer(
                     }
                 }
                 size_out += dst->data->shape[0] * dst->data->shape[1] * dst->data->shape[2];
+                variable_index++;
                 varls = varls->next;
                 varld = varld->next;
+            }
+            if (aux_count > 0) {
+                GPUManager::getInstance().join_aux_streams(
+                    parent_stream, aux_streams.data(), aux_count
+                );
+                touch_stream(parent_stream);
             }
         }
         dst = dst->next;
