@@ -385,32 +385,76 @@ MPI 并行”，也包含“单进程内更细粒度的 OpenMP 调度”。真�
 
 #### 4.2.3 调度优化：让已有任务尽量均衡，但不过度切分
 
-OpenMP 诊断显示主 RK block phase 的综合利用率已经约 85%；全程平均 CPU 较低
-还包含 level 0 只有 9 个 block、层间递归、Sync 和输出。因此不能只根据
-“平均不到 30”就继续增加线程。
+这里的“静态层”和 OpenMP 的 schedule(static) 没有关系。程序共有 9 个 AMR
+level，输入参数规定 moving levels start from=5：
 
-先比较 static、dynamic 和 guided。30 blocks 对应 30 workers 时，每个线程只有
-一个大任务，换 schedule 几乎没有收益。中间版本增加到 60 blocks 并使用
-dynamic,1，曾在当时的代码上改善 level 7/8 长尾约 3.05%。但是后续工作量变化
-后重新校准发现：
+- level 0--4 是静态层：这些粗网格 patch 的空间位置固定，不跟随黑洞移动；
+- level 5--8 是移动层：这些细化 patch 围绕黑洞，并可能随黑洞位置移动或 regrid。
 
-| 最终几何 sweep | Evolve t=0..4 |
-|---|---:|
-| 24/30 blocks | 29.899 s |
-| 60/60 blocks | 31.864 s |
-| 90/90 blocks | 35.511 s |
+移动层分辨率更高、递归子步更多，也是主要计算区，因此分配全部 30 个物理核；
+静态层工作较少，使用 24 个线程。level 0 实际只有 9 个 block，所以即使创建
+24 个线程，该层最多也只能同时使用约 9 个线程。
 
-更多 block 虽然提供更多任务，却增加 ghost zone、边界、Sync 和调度工作。
-所以最终配置是静态层 24 blocks/threads、移动层 30 blocks/threads，并使用
-dynamic,1 处理同一层中不同 block 的工作量差异。
+一个 block 不是单纯的任务描述，而是把空间 patch 真正切成的子区域；它拥有自己的
+数组范围、边界和 ghost zone。在一个 RHS/RK phase 中，一个 block 大致对应一个
+OpenMP 任务。因此把目标从 30 增加到 60，确实相当于把网格进一步切成更多 block，
+从而让每个线程完成一个 block 后还能领取下一个任务。但代价是更多 ghost cell、
+边界计算、Sync、prolong/restrict 和调度调用。
 
-60 个 OpenMP worker 使用 SMT sibling 时比 30 worker 慢约 36.7%，IPC 从约
-1.47 降到 0.76，dTLB miss 从约 3.62% 升到 10.46%。最终使用 30 个物理核，
-而不是追求表面上 60 个活跃硬件线程。
+先只比较 static、dynamic 和 guided。24/30 blocks 对应 24/30 workers 时，每个
+线程基本只有一个大任务，没有第二个任务可以接手，所以换 schedule 几乎没有收益。
+一次较早实验中，60 blocks + dynamic,1 曾快约 3.05%，这说明“增加可调度任务数”
+值得继续验证；但在后续代码上做更完整的交错 sweep 后，结果反转：
+
+| block 几何，线程始终为 24/30 | Evolve t=0..4 | 平均 CPU |
+|---|---:|---:|
+| 静态 24 / 移动 30 | 29.899 s | 21.982 / 30 |
+| 静态 60 / 移动 60 | 31.864 s | 20.462 / 30 |
+| 静态 90 / 移动 90 | 35.511 s | 18.576 / 30 |
+
+因此最终没有保留更多 block，而是恢复静态层 24 blocks/threads、移动层
+30 blocks/threads。dynamic,1 仍作为统一运行时策略保留，但在 block 数约等于
+线程数时，它只能处理任务发放顺序，不能消除最后一个大 block 的长尾。主要收益
+来自前两节新增的并行区域，而不是单独切换 schedule。
+
+60 个 OpenMP worker 使用 SMT sibling 时比 30 worker 慢约 36.7%，Evolve 从
+29.983 s 增加到 40.995 s；IPC 从约 1.47 降到 0.76，dTLB miss 从约 3.62%
+升到 10.46%。最终使用 30 个物理核，而不是追求表面上 60 个活跃硬件线程。
 
 跨整个 RK4 的持久 OpenMP team 也做过实验，但稳定回退约 10%--12%。RK、Sync
 和层间递归中的真实 barrier 仍然存在，持久 team 只是让整个线程组一起等待，
 没有创造新的可执行任务，因此没有保留。
+
+完成任务级 OpenMP 并行和最终几何校准后的严格 profile 为：
+
+| 指标 | OpenMP 阶段最终值 |
+|---|---:|
+| 纯 Evolve，t=0..4 | 29.878 s |
+| ABE Total | 32.277 s |
+| 全窗口平均 CPU | 23.268 / 30，即 77.6% |
+| IPC | 1.47 |
+| CPU migration / context switch | 0 / 0 |
+
+这里 t=0..4 会产生 0、1、2、3、4 五个输出时刻，但实际演化长度是 4 个时间单位；
+29.878 s 只计算 Evolve，不包含 ABE 初始化。若“t=5”指实际演化到时间 5，则本阶段
+没有对应的独立实测，不能把 29.878 s 简单按 5/4 缩放后当成测量结果。
+
+23.268/30 来自 perf stat 覆盖整个 ABE 进程的 task-clock/wall，而不是只在
+Evolve 入口和出口之间启停 PMU，因此它是包含约 2.4 s 初始化的全窗口平均值。
+P4 profile 是完成全部调度实验时的整程序状态，不能把 29.878 s 的全部改善都
+归因于 schedule；各项 OpenMP 改动的因果收益仍以上面的交错 A/B 为准。
+
+平均 77.6% 也不表示主计算区只用了 23 个线程。分 level 的 block phase 利用率为：
+
+| level | 类型 | blocks / threads | phase utilization |
+|---:|---|---:|---:|
+| 0 | 静态层 | 9 / 24 | 约 30% |
+| 1--4 | 静态层 | 24 / 24 | 约 79%--80% |
+| 5 | 移动层 | 30 / 30 | 约 78% |
+| 6--8 | 移动层 | 30 / 30 | 约 84%--86% |
+
+全窗口平均值还包含 RecursiveStep 层间顺序、Sync/transfer、regrid 和输出。
+因此剩余空转主要来自粗层任务数上限和算法必需的阶段依赖，不是绑核失效。
 
 这一阶段结束后的 profile 中，MPI 和明显串行区已经不再是主要问题。
 compute_rhs_bssn、kodis、fdderivs、lopsided 和 fderivs 成为主要热点，
