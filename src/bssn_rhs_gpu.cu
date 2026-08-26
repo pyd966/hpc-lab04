@@ -193,8 +193,7 @@ __global__ void rhs_beta_gamma_prepare_kernel(RHS_KERNEL_PARAMS) {
 
 __global__ void rhs_beta_gamma_kernel(RHS_KERNEL_PARAMS) {
     (void)T; (void)chi_rhs; (void)trK_rhs; (void)Lap_rhs;
-    (void)ham_Res; (void)movx_Res; (void)movy_Res; (void)movz_Res;
-    (void)Gmx_Res; (void)Gmy_Res; (void)Gmz_Res; (void)eps; (void)co;
+    (void)eps; (void)co;
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     const int j = blockIdx.y * blockDim.y + threadIdx.y;
     const int k = blockIdx.z * blockDim.z + threadIdx.z;
@@ -224,21 +223,41 @@ __global__ void rhs_beta_gamma_kernel(RHS_KERNEL_PARAMS) {
     Gamx_rhs[idx] = val_Gamx_rhs;
     Gamy_rhs[idx] = val_Gamy_rhs;
     Gamz_rhs[idx] = val_Gamz_rhs;
+
+    // Reuse consumed beta/Gamma scratch to publish derivatives for both Ricci consumers.
+    const int dims[3] = {ex0, ex1, ex2};
+    double dGamxx, dGamxy, dGamxz;
+    double dGamyx, dGamyy, dGamyz;
+    double dGamzx, dGamzy, dGamzz;
+    d_fderivs_point(dims, Gamx, &dGamxx, &dGamxy, &dGamxz,
+                    X, Y, Z, ANTI, SYM, SYM, symmetry, lev, i, j, k);
+    d_fderivs_point(dims, Gamy, &dGamyx, &dGamyy, &dGamyz,
+                    X, Y, Z, SYM, ANTI, SYM, symmetry, lev, i, j, k);
+    d_fderivs_point(dims, Gamz, &dGamzx, &dGamzy, &dGamzz,
+                    X, Y, Z, SYM, SYM, ANTI, symmetry, lev, i, j, k);
+
+    ham_Res[idx] = dGamxx;
+    movx_Res[idx] = dGamxy;
+    movy_Res[idx] = dGamxz;
+    movz_Res[idx] = dGamyx;
+    Gmx_Res[idx] = dGamyy;
+    Gmy_Res[idx] = dGamyz;
+    Gmz_Res[idx] = dGamzx;
+    Ayy_rhs[idx] = dGamzy;
+    Ayz_rhs[idx] = dGamzz;
 }
 __global__ void rhs_ricci_connection_diag_kernel(RHS_KERNEL_PARAMS) {
     (void)T; (void)chi; (void)trK; (void)Axx; (void)Axy; (void)Axz; (void)Ayy; (void)Ayz; (void)Azz;
     (void)Lap; (void)betax; (void)betay; (void)betaz; (void)dtSfx; (void)dtSfy; (void)dtSfz;
     (void)chi_rhs; (void)trK_rhs; (void)gxx_rhs; (void)gxy_rhs; (void)gxz_rhs; (void)gyy_rhs; (void)gyz_rhs; (void)gzz_rhs;
-    (void)Axx_rhs; (void)Axy_rhs; (void)Axz_rhs; (void)Ayy_rhs; (void)Ayz_rhs; (void)Azz_rhs;
+    (void)Axx_rhs; (void)Axy_rhs; (void)Axz_rhs; (void)Azz_rhs;
     (void)Gamx_rhs; (void)Gamy_rhs; (void)Gamz_rhs; (void)Lap_rhs;
-    (void)ham_Res; (void)movx_Res; (void)movy_Res; (void)movz_Res; (void)Gmx_Res; (void)Gmy_Res; (void)Gmz_Res;
     (void)eps; (void)co;
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     const int j = blockIdx.y * blockDim.y + threadIdx.y;
     const int k = blockIdx.z * blockDim.z + threadIdx.z;
     if (i >= ex0 || j >= ex1 || k >= ex2) return;
     const int idx = IDX3D(i, j, k, ex0, ex1, ex2);
-    const int dims[3] = {ex0, ex1, ex2};
     const double l_gxx = dxx[idx] + ONE, l_gxy = gxy[idx], l_gxz = gxz[idx];
     const double l_gyy = dyy[idx] + ONE, l_gyz = gyz[idx], l_gzz = dzz[idx] + ONE;
     const double gupxx = betax_rhs[idx], gupxy = betay_rhs[idx], gupxz = betaz_rhs[idx];
@@ -279,14 +298,10 @@ __global__ void rhs_ricci_connection_diag_kernel(RHS_KERNEL_PARAMS) {
                          TWO * (gupxy * l_Gamyxy + gupxz * l_Gamyxz + gupyz * l_Gamyyz);
     const double Gamza = gupxx * l_Gamzxx + gupyy * l_Gamzyy + gupzz * l_Gamzzz +
                          TWO * (gupxy * l_Gamzxy + gupxz * l_Gamzxz + gupyz * l_Gamzyz);
-    double dGamxx, dGamxy, dGamxz, dGamyx, dGamyy, dGamyz, dGamzx, dGamzy, dGamzz;
-    d_fderivs_point(dims, Gamx, &dGamxx, &dGamxy, &dGamxz, X, Y, Z, ANTI, SYM, SYM, symmetry, lev, i, j, k);
-    d_fderivs_point(dims, Gamy, &dGamyx, &dGamyy, &dGamyz, X, Y, Z, SYM, ANTI, SYM, symmetry, lev, i, j, k);
-    d_fderivs_point(dims, Gamz, &dGamzx, &dGamzy, &dGamzz, X, Y, Z, SYM, SYM, ANTI, symmetry, lev, i, j, k);
     // __DIAG_FORMULAS__
     // Rxx Correction
     l_Rxx = -HALF * l_Rxx +
-          l_gxx * dGamxx + l_gxy * dGamyx + l_gxz * dGamzx +
+          l_gxx * ham_Res[idx] + l_gxy * movz_Res[idx] + l_gxz * Gmz_Res[idx] +
           Gamxa * gxxx + Gamya * gxyx + Gamza * gxzx +
           gupxx * (TWO*(l_Gamxxx*gxxx + l_Gamyxx*gxyx + l_Gamzxx*gxzx) + l_Gamxxx*gxxx + l_Gamyxx*gxxy + l_Gamzxx*gxxz) +
           gupxy * (TWO*(l_Gamxxx*gxyx + l_Gamyxx*gyyx + l_Gamzxx*gyzx + l_Gamxxy*gxxx + l_Gamyxy*gxyx + l_Gamzxy*gxzx) + l_Gamxxy*gxxx + l_Gamyxy*gxxy + l_Gamzxy*gxxz + l_Gamxxx*gxyx + l_Gamyxx*gxyy + l_Gamzxx*gxyz) +
@@ -297,7 +312,7 @@ __global__ void rhs_ricci_connection_diag_kernel(RHS_KERNEL_PARAMS) {
 
     // Ryy Correction
     l_Ryy = -HALF * l_Ryy +
-          l_gxy * dGamxy + l_gyy * dGamyy + l_gyz * dGamzy +
+          l_gxy * movx_Res[idx] + l_gyy * Gmx_Res[idx] + l_gyz * Ayy_rhs[idx] +
           Gamxa * gxyy + Gamya * gyyy + Gamza * gyzy +
           gupxx * (TWO*(l_Gamxxy*gxxy + l_Gamyxy*gxyy + l_Gamzxy*gxzy) + l_Gamxxy*gxyx + l_Gamyxy*gxyy + l_Gamzxy*gxyz) +
           gupxy * (TWO*(l_Gamxxy*gxyy + l_Gamyxy*gyyy + l_Gamzxy*gyzy + l_Gamxyy*gxxy + l_Gamyyy*gxyy + l_Gamzyy*gxzy) + l_Gamxyy*gxyx + l_Gamyyy*gxyy + l_Gamzyy*gxyz + l_Gamxxy*gyyx + l_Gamyxy*gyyy + l_Gamzxy*gyyz) +
@@ -308,7 +323,7 @@ __global__ void rhs_ricci_connection_diag_kernel(RHS_KERNEL_PARAMS) {
 
     // Rzz Correction
     l_Rzz = -HALF * l_Rzz +
-          l_gxz * dGamxz + l_gyz * dGamyz + l_gzz * dGamzz +
+          l_gxz * movy_Res[idx] + l_gyz * Gmy_Res[idx] + l_gzz * Ayz_rhs[idx] +
           Gamxa * gxzz + Gamya * gyzz + Gamza * gzzz +
           gupxx * (TWO*(l_Gamxxz*gxxz + l_Gamyxz*gxyz + l_Gamzxz*gxzz) + l_Gamxxz*gxzx + l_Gamyxz*gxzy + l_Gamzxz*gxzz) +
           gupxy * (TWO*(l_Gamxxz*gxyz + l_Gamyxz*gyyz + l_Gamzxz*gyzz + l_Gamxyz*gxxz + l_Gamyyz*gxyz + l_Gamzyz*gxzz) + l_Gamxyz*gxzx + l_Gamyyz*gxzy + l_Gamzyz*gxzz + l_Gamxxz*gyzx + l_Gamyxz*gyzy + l_Gamzxz*gyzz) +
@@ -322,16 +337,14 @@ __global__ void rhs_ricci_connection_offdiag_kernel(RHS_KERNEL_PARAMS) {
     (void)T; (void)chi; (void)trK; (void)Axx; (void)Axy; (void)Axz; (void)Ayy; (void)Ayz; (void)Azz;
     (void)Lap; (void)betax; (void)betay; (void)betaz; (void)dtSfx; (void)dtSfy; (void)dtSfz;
     (void)chi_rhs; (void)trK_rhs; (void)gxx_rhs; (void)gxy_rhs; (void)gxz_rhs; (void)gyy_rhs; (void)gyz_rhs; (void)gzz_rhs;
-    (void)Axx_rhs; (void)Axy_rhs; (void)Axz_rhs; (void)Ayy_rhs; (void)Ayz_rhs; (void)Azz_rhs;
+    (void)Axx_rhs; (void)Axy_rhs; (void)Axz_rhs; (void)Azz_rhs;
     (void)Gamx_rhs; (void)Gamy_rhs; (void)Gamz_rhs; (void)Lap_rhs;
-    (void)ham_Res; (void)movx_Res; (void)movy_Res; (void)movz_Res; (void)Gmx_Res; (void)Gmy_Res; (void)Gmz_Res;
     (void)eps; (void)co;
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     const int j = blockIdx.y * blockDim.y + threadIdx.y;
     const int k = blockIdx.z * blockDim.z + threadIdx.z;
     if (i >= ex0 || j >= ex1 || k >= ex2) return;
     const int idx = IDX3D(i, j, k, ex0, ex1, ex2);
-    const int dims[3] = {ex0, ex1, ex2};
     const double l_gxx = dxx[idx] + ONE, l_gxy = gxy[idx], l_gxz = gxz[idx];
     const double l_gyy = dyy[idx] + ONE, l_gyz = gyz[idx], l_gzz = dzz[idx] + ONE;
     const double gupxx = betax_rhs[idx], gupxy = betay_rhs[idx], gupxz = betaz_rhs[idx];
@@ -372,15 +385,11 @@ __global__ void rhs_ricci_connection_offdiag_kernel(RHS_KERNEL_PARAMS) {
                          TWO * (gupxy * l_Gamyxy + gupxz * l_Gamyxz + gupyz * l_Gamyyz);
     const double Gamza = gupxx * l_Gamzxx + gupyy * l_Gamzyy + gupzz * l_Gamzzz +
                          TWO * (gupxy * l_Gamzxy + gupxz * l_Gamzxz + gupyz * l_Gamzyz);
-    double dGamxx, dGamxy, dGamxz, dGamyx, dGamyy, dGamyz, dGamzx, dGamzy, dGamzz;
-    d_fderivs_point(dims, Gamx, &dGamxx, &dGamxy, &dGamxz, X, Y, Z, ANTI, SYM, SYM, symmetry, lev, i, j, k);
-    d_fderivs_point(dims, Gamy, &dGamyx, &dGamyy, &dGamyz, X, Y, Z, SYM, ANTI, SYM, symmetry, lev, i, j, k);
-    d_fderivs_point(dims, Gamz, &dGamzx, &dGamzy, &dGamzz, X, Y, Z, SYM, SYM, ANTI, symmetry, lev, i, j, k);
     // __OFFDIAG_FORMULAS__
     // Rxy Correction
     l_Rxy = HALF * ( - l_Rxy +
-          l_gxx * dGamxy + l_gxy * dGamyy + l_gxz * dGamzy +
-          l_gxy * dGamxx + l_gyy * dGamyx + l_gyz * dGamzx +
+          l_gxx * movx_Res[idx] + l_gxy * Gmx_Res[idx] + l_gxz * Ayy_rhs[idx] +
+          l_gxy * ham_Res[idx] + l_gyy * movz_Res[idx] + l_gyz * Gmz_Res[idx] +
           Gamxa * gxyx + Gamya * gyyx + Gamza * gyzx +
           Gamxa * gxxy + Gamya * gxyy + Gamza * gxzy) +
           gupxx * (l_Gamxxx*gxxy + l_Gamyxx*gxyy + l_Gamzxx*gxzy + l_Gamxxy*gxxx + l_Gamyxy*gxyx + l_Gamzxy*gxzx + l_Gamxxx*gxyx + l_Gamyxx*gxyy + l_Gamzxx*gxyz) +
@@ -392,8 +401,8 @@ __global__ void rhs_ricci_connection_offdiag_kernel(RHS_KERNEL_PARAMS) {
 
     // Rxz Correction
     l_Rxz = HALF * ( - l_Rxz +
-          l_gxx * dGamxz + l_gxy * dGamyz + l_gxz * dGamzz +
-          l_gxz * dGamxx + l_gyz * dGamyx + l_gzz * dGamzx +
+          l_gxx * movy_Res[idx] + l_gxy * Gmy_Res[idx] + l_gxz * Ayz_rhs[idx] +
+          l_gxz * ham_Res[idx] + l_gyz * movz_Res[idx] + l_gzz * Gmz_Res[idx] +
           Gamxa * gxzx + Gamya * gyzx + Gamza * gzzx +
           Gamxa * gxxz + Gamya * gxyz + Gamza * gxzz) +
           gupxx * (l_Gamxxx*gxxz + l_Gamyxx*gxyz + l_Gamzxx*gxzz + l_Gamxxz*gxxx + l_Gamyxz*gxyx + l_Gamzxz*gxzx + l_Gamxxx*gxzx + l_Gamyxx*gxzy + l_Gamzxx*gxzz) +
@@ -405,8 +414,8 @@ __global__ void rhs_ricci_connection_offdiag_kernel(RHS_KERNEL_PARAMS) {
 
     // Ryz Correction
     l_Ryz = HALF * ( - l_Ryz +
-          l_gxy * dGamxz + l_gyy * dGamyz + l_gyz * dGamzz +
-          l_gxz * dGamxy + l_gyz * dGamyy + l_gzz * dGamzy +
+          l_gxy * movy_Res[idx] + l_gyy * Gmy_Res[idx] + l_gyz * Ayz_rhs[idx] +
+          l_gxz * movx_Res[idx] + l_gyz * Gmx_Res[idx] + l_gzz * Ayy_rhs[idx] +
           Gamxa * gxzy + Gamya * gyzy + Gamza * gzzy +
           Gamxa * gxyz + Gamya * gyyz + Gamza * gyzz) +
           gupxx * (l_Gamxxy*gxxz + l_Gamyxy*gxyz + l_Gamzxy*gxzz + l_Gamxxz*gxxy + l_Gamyxz*gxyy + l_Gamzxz*gxzy + l_Gamxxy*gxzx + l_Gamyxy*gxzy + l_Gamzxy*gxzz) +
