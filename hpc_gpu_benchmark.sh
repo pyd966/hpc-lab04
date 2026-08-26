@@ -21,6 +21,7 @@ if [[ ! -f "$ROOT_DIR/CMakeLists.txt" ]]; then
 fi
 
 cd "$ROOT_DIR"
+export AMSS_EXECUTION_MODE=gpu
 mkdir -p profile
 
 RUN_ID="${HPC_JOB_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$BASHPID}"
@@ -59,6 +60,7 @@ echo "=== Build outside measured region ==="
     -DAMSS_ENABLE_GPU=ON \
     -DCMAKE_CUDA_ARCHITECTURES=80 \
     -DAMSS_ENABLE_OPENMP=OFF \
+    -DAMSS_ENABLE_OMP_ONLY=OFF \
     -DAMSS_ENABLE_TWOPUNCTURE_OPENMP=ON \
     -DAMSS_OPT=-O3 \
     2>&1 | tee "$ARTIFACT_DIR/build.log"

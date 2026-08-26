@@ -37,7 +37,29 @@ fi
 [[ -n "${AMSS_CUDA_ARCHITECTURES:-}" ]] && cmake_args+=("-DCMAKE_CUDA_ARCHITECTURES=$AMSS_CUDA_ARCHITECTURES")
 [[ -n "${AMSS_ARCH_FLAGS:-}" ]]    && cmake_args+=("-DAMSS_ARCH_FLAGS=$AMSS_ARCH_FLAGS")
 [[ -n "${AMSS_ENABLE_OPENMP:-}" ]] && cmake_args+=("-DAMSS_ENABLE_OPENMP=$AMSS_ENABLE_OPENMP")
+[[ -n "${AMSS_ENABLE_OMP_ONLY:-}" ]] && cmake_args+=("-DAMSS_ENABLE_OMP_ONLY=$AMSS_ENABLE_OMP_ONLY")
+[[ -n "${AMSS_ENABLE_TWOPUNCTURE_OPENMP:-}" ]] && cmake_args+=("-DAMSS_ENABLE_TWOPUNCTURE_OPENMP=$AMSS_ENABLE_TWOPUNCTURE_OPENMP")
 [[ -n "${AMSS_MPI_CUDA_AWARE:-}" ]] && cmake_args+=("-DAMSS_MPI_CUDA_AWARE=$AMSS_MPI_CUDA_AWARE")
+
+# A plain ./compile.sh is the build path used by the OJ.  Make it produce the
+# same one-process OpenMP CPU executable as run.sh.  GPU scripts pass
+# AMSS_EXECUTION_MODE=gpu or an explicit GPU option and retain their own flags;
+# trailing command-line arguments always have the final say in CMake.
+compile_mode="${AMSS_EXECUTION_MODE:-cpu}"
+cpu_defaults=1
+[[ "$compile_mode" == "gpu" ]] && cpu_defaults=0
+for arg in "$@"; do
+  case "$arg" in
+    -DAMSS_ENABLE_GPU=ON|-DAMSS_ENABLE_GPU:BOOL=ON) cpu_defaults=0 ;;
+  esac
+done
+if (( cpu_defaults )); then
+  cmake_args+=("-DAMSS_ENABLE_GPU=OFF" "-DAMSS_ENABLE_OPENMP=ON" "-DAMSS_ENABLE_OMP_ONLY=ON")
+elif [[ "$compile_mode" == "gpu" ]]; then
+  # Do not inherit OMP_ONLY=ON when a build directory is reused for GPU.
+  # An explicit trailing -DAMSS_ENABLE_OMP_ONLY=ON can still override this.
+  cmake_args+=("-DAMSS_ENABLE_OMP_ONLY=OFF")
+fi
 
 echo "==> Configure: $CMAKE -S \"$ROOT_DIR\" -B \"$BUILD_DIR\" ${cmake_args[*]:-} $*"
 "$CMAKE" -S "$ROOT_DIR" -B "$BUILD_DIR" "${cmake_args[@]}" "$@"

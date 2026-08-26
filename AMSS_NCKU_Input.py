@@ -16,11 +16,11 @@ import numpy
 File_directory   = "GW250118"                    ## output file directory
 Output_directory = "binary_output"               ## binary data file directory
                                                  ## The file directory name should not be too long
-MPI_processes    = 1                             ## one rank drives the single A100 MIG instance
-OMP_threads      = 16                            ## host threads used by the TwoPuncture stage
+MPI_processes    = 1                             ## CPU path uses one OpenMP-only process
+OMP_threads      = 60                            ## official OJ allocation; run.sh detects cpuset
 
-GPU_Calculation  = "yes"                         ## Use GPU or not
-                                                 ## one ABEGPU rank drives the allocated MIG device
+GPU_Calculation  = "no"                          ## CPU is the direct-run default
+                                                 ## GPU scripts opt in explicitly
 
 #################################################
 
@@ -43,7 +43,7 @@ Finite_Diffenence_Method = "4th-order"             ## fixed in this trimmed lab 
 ## Setting the time evolutionary information
 
 Start_Evolution_Time     = 0.0                    ## start evolution time t0
-## NOTE: For CPU, set Final_Evolution_Time to 40.0, while GPU keeps it as 100.0
+## NOTE: CPU uses 40.0; GPU launch scripts select 100.0 at runtime.
 Final_Evolution_Time     = 100.0 if GPU_Calculation == "yes" else 40.0  ## final evolution time t1
 Check_Time               = 1000.0
 Dump_Time                = 1000.0                  ## time inteval dT for dumping binary data

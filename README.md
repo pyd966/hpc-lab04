@@ -80,8 +80,7 @@ inspect the architectures embedded in a GPU executable.
 This builds:
 
 - `build/ABE`
-- `build/ABEGPU` (only when `AMSS_ENABLE_GPU=ON`, which is the default on
-  the amd64 image and `OFF` on the arm64 image)
+- `build/ABEGPU` (only when `AMSS_ENABLE_GPU=ON` is requested explicitly)
 - `build/TwoPunctureABE`
 
 For a faster debug build:
@@ -95,6 +94,12 @@ For a faster debug build:
 ```bash
 ./run.sh
 ```
+
+`run.sh` defaults to the CPU OpenMP-only path used by the OJ: it detects the
+physical cores in the scheduler cpuset, binds OpenMP threads to cores, and
+rebuilds an incompatible or missing CPU build automatically.  The dedicated
+GPU scripts set `AMSS_EXECUTION_MODE=gpu` explicitly; an interactive GPU run
+can do the same before invoking `run.sh`.
 
 Optional TwoPuncture cache:
 

@@ -68,6 +68,9 @@ def run_ABE():
 
     omp_only = (os.environ.get("AMSS_OMP_ONLY_RUN", "0").lower()
                 in ("1", "on", "true", "yes"))
+    if (os.environ.get("AMSS_EXECUTION_MODE", "cpu").lower() == "cpu"
+            and input_data.GPU_Calculation == "no"):
+        omp_only = True
     omp_threads = os.environ.get("OMP_NUM_THREADS",
                                  str(input_data.OMP_threads))
 

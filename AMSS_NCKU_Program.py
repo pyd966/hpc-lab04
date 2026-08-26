@@ -42,6 +42,23 @@ os.sched_setaffinity(0, SCHEDULER_AFFINITY)
 
 import AMSS_NCKU_Input as input_data
 
+# The OJ invokes run.sh directly and does not select a separate CPU wrapper.
+# Keep CPU as the safe default while allowing the dedicated GPU scripts to opt
+# in explicitly.  This assignment happens before the optional short-run
+# override so profiling/debug runs retain their requested end time.
+EXECUTION_MODE = os.environ.get("AMSS_EXECUTION_MODE", "cpu").lower()
+if EXECUTION_MODE == "cpu":
+    input_data.GPU_Calculation = "no"
+    input_data.Final_Evolution_Time = 40.0
+    # Also make direct `python3 AMSS_NCKU_Program.py` CPU-only.  run.sh adds
+    # the detected core count and binding policy around this default.
+    os.environ.setdefault("AMSS_OMP_ONLY_RUN", "1")
+elif EXECUTION_MODE == "gpu":
+    input_data.GPU_Calculation = "yes"
+    input_data.Final_Evolution_Time = 100.0
+else:
+    sys.exit(" AMSS_EXECUTION_MODE must be 'cpu' or 'gpu'")
+
 # A shortened evolution window is useful for profiler iterations that cannot
 # fit the full fixed workload into the cluster wall-time limit. It is opt-in;
 # normal and grading runs continue to use AMSS_NCKU_Input.py unchanged.
