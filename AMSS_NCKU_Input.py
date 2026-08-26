@@ -17,7 +17,7 @@ File_directory   = "GW250118"                    ## output file directory
 Output_directory = "binary_output"               ## binary data file directory
                                                  ## The file directory name should not be too long
 MPI_processes    = 1                             ## CPU path uses one OpenMP-only process
-OMP_threads      = 60                            ## official OJ allocation; run.sh detects cpuset
+OMP_threads      = 30                            ## validated 24/30 block geometry; 60 blocks regress
 
 GPU_Calculation  = "no"                          ## CPU is the direct-run default
                                                  ## GPU scripts opt in explicitly

@@ -11,7 +11,7 @@ set -euo pipefail
 # This marker is intentionally kept in an OJ-accepted file. It makes it
 # possible to identify the submitted CPU launch wrapper when the checkout has
 # no .git directory.
-CPU_ROUTE_MARKER="omp-only-launch-v2"
+CPU_ROUTE_MARKER="omp-30-geometry-v3"
 
 # Ansorg-TwoPuncture allocates large Fortran automatic arrays.
 ulimit -s unlimited
@@ -199,6 +199,12 @@ if [[ "$AMSS_EXECUTION_MODE" == "cpu" ]]; then
     detected_cores="$($ROOT_DIR/scripts/count_available_physical_cores.sh)"
   else
     detected_cores="$(nproc 2>/dev/null || echo 1)"
+    # The OJ only collects selected files, so the topology helper is absent.
+    # This workload's measured optimum is 24/30 blocks and workers; scaling
+    # the decomposition to all 60 allocated cores makes the AMR tasks too fine.
+    if [[ "$detected_cores" =~ ^[1-9][0-9]*$ ]] && (( detected_cores > 30 )); then
+      detected_cores=30
+    fi
   fi
   [[ "$detected_cores" =~ ^[1-9][0-9]*$ ]] || detected_cores=1
   OMP_NUM_THREADS="${OMP_NUM_THREADS:-$detected_cores}"
@@ -302,4 +308,28 @@ if [[ "$AMSS_EXECUTION_MODE" == "cpu" ]]; then
 fi
 
 cd "$ROOT_DIR"
-"$PYTHON" AMSS_NCKU_Program.py
+runtime_log="$(mktemp "${TMPDIR:-/tmp}/amss-runtime.XXXXXX.log")"
+set +e
+"$PYTHON" AMSS_NCKU_Program.py 2>&1 | tee "$runtime_log"
+pipeline_status=$?
+set -e
+
+echo "==> AMSS performance recap"
+grep -E 'TwoPunctures\.C (affinity|OpenMP|Solve wall time)|ABE (affinity|OpenMP)|Before Evolve|Total Evolve Time|Total Running Time' \
+  "$runtime_log" || echo "    expected native timing markers were not found"
+awk '
+  /AMSS_STEP_TIMING/ {
+    if (count == 0) first = $0
+    last = $0
+    count++
+  }
+  END {
+    if (count > 0) {
+      print "    first: " first
+      print "    last : " last
+      print "    timed evolution steps: " count
+    }
+  }
+' "$runtime_log"
+rm -f "$runtime_log"
+exit "$pipeline_status"

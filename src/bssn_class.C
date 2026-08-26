@@ -1753,6 +1753,7 @@ void bssn_class::Evolve(int Steps)
 
   for (int ncount = 1; ncount < Steps + 1; ncount++)
   {
+    const double step_wall_start = MPI_Wtime();
     // special for large mass ratio consideration
     //     if(fabs(Porg0[0][0]-Porg0[1][0])+fabs(Porg0[0][1]-Porg0[1][1])+fabs(Porg0[0][2]-Porg0[1][2])<1e-6) 
     //     { GH->levels=GH->movls; }
@@ -1816,6 +1817,9 @@ void bssn_class::Evolve(int Steps)
       cout << " Timestep # " << ncount << ": integrating to time: " << PhysTime << "   "
            << " Computer used " << (double)(curr_clock - prev_clock) / ((double)CLOCKS_PER_SEC) 
            << " seconds! " << endl;
+      cout << " AMSS_STEP_TIMING step=" << ncount
+           << " physical_time=" << PhysTime
+           << " wall_seconds=" << MPI_Wtime() - step_wall_start << endl;
       // cout << endl;
     }
 
