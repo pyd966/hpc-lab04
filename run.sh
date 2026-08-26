@@ -11,6 +11,53 @@ set -euo pipefail
 # Ansorg-TwoPuncture allocates large Fortran automatic arrays.
 ulimit -s unlimited
 
+# Resolve the repository from the submission working directory.  hpc may run
+# a copied script from /tmp, while the OJ invokes this file from the checkout;
+# AMSS_ROOT_DIR is exported below so the in-process launcher can be called
+# later from ABE's output directory.
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="${AMSS_ROOT_DIR:-$PWD}"
+if [[ ! -f "$ROOT_DIR/CMakeLists.txt" && -f "$SCRIPT_DIR/CMakeLists.txt" ]]; then
+  ROOT_DIR="$SCRIPT_DIR"
+fi
+ROOT_DIR="$(cd -- "$ROOT_DIR" && pwd)"
+
+# The OJ keeps its own Python launcher and does not collect scripts/*.py.  Its
+# launcher can still call `$AMSS_MPIEXEC ... ./ABE`; this small mode is a
+# built-in compatibility launcher that consumes the MPI-shaped arguments,
+# forwards env assignments, and executes the one OpenMP process directly.
+if [[ "${1:-}" == "--amss-omp-launch" ]]; then
+  shift
+  executable=""
+  saw_env=0
+  while (( $# > 0 )); do
+    argument="$1"
+    shift
+    if [[ "$argument" == "env" ]]; then
+      saw_env=1
+      continue
+    fi
+    if (( saw_env )); then
+      if [[ "$argument" == *=* ]]; then
+        export "$argument"
+        continue
+      fi
+      executable="$argument"
+      break
+    fi
+    if [[ "$argument" == "./ABE" || "$argument" == "./ABEGPU" ||
+          "$argument" == "./TwoPunctureABE" ]]; then
+      executable="$argument"
+      break
+    fi
+  done
+  if [[ -z "$executable" ]]; then
+    echo "CPU launcher could not find an executable in MPI-shaped command" >&2
+    exit 2
+  fi
+  exec "$executable" "$@"
+fi
+
 # OJ executes this script directly.  CPU OpenMP-only is therefore the default
 # execution mode; GPU workflows set AMSS_EXECUTION_MODE=gpu explicitly.
 AMSS_EXECUTION_MODE="${AMSS_EXECUTION_MODE:-cpu}"
@@ -18,9 +65,7 @@ case "$AMSS_EXECUTION_MODE" in
   cpu|gpu) ;;
   *) echo "AMSS_EXECUTION_MODE must be 'cpu' or 'gpu'" >&2; exit 2 ;;
 esac
-export AMSS_EXECUTION_MODE
-
-ROOT_DIR="$(pwd)"
+export AMSS_EXECUTION_MODE AMSS_ROOT_DIR="$ROOT_DIR"
 
 if [[ "$AMSS_EXECUTION_MODE" == "cpu" ]]; then
   # Count physical cores in the scheduler-provided cpuset.  Explicit
@@ -70,7 +115,13 @@ resolve_under_root() {
 AMSS_BUILD_DIR="$(resolve_under_root "${AMSS_BUILD_DIR:-$ROOT_DIR/build}")"
 AMSS_OUTPUT_ROOT="$(resolve_under_root "${AMSS_OUTPUT_ROOT:-$ROOT_DIR}")"
 AMSS_CACHE_DIR="$(resolve_under_root "${AMSS_CACHE_DIR:-$ROOT_DIR/twopuncture_cache}")"
-AMSS_MPIEXEC="${AMSS_MPIEXEC:-mpiexec}"
+if [[ "$AMSS_EXECUTION_MODE" == "cpu" ]]; then
+  # Override any scheduler-provided mpiexec command.  This is needed even
+  # when the OJ's unsubmitted Python helper ignores AMSS_OMP_ONLY_RUN.
+  AMSS_MPIEXEC="$ROOT_DIR/run.sh --amss-omp-launch"
+else
+  AMSS_MPIEXEC="${AMSS_MPIEXEC:-mpiexec}"
+fi
 export AMSS_BUILD_DIR AMSS_OUTPUT_ROOT AMSS_CACHE_DIR AMSS_MPIEXEC
 
 if [[ "$AMSS_EXECUTION_MODE" == "cpu" ]]; then
