@@ -1593,7 +1593,57 @@ void gpu_compute_rhs_bssn_launch( // launch kernel with device pointers
     rhs_ricci_a_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
     rhs_gamma_seed_fused_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
     // 1. Kernel 1: Derivatives & Connection Coefficients
-    rhs_beta_gamma_prepare_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
+    if (symmetry == 1) {
+        CompactBetaPrepareFields beta_prepare_fields{};
+        const double* beta_inputs[COMPACT_BETA_FIELDS] = {
+            d_betax, d_betay, d_betaz
+        };
+        double* beta_divergence[COMPACT_BETA_FIELDS] = {
+            d_ham_Res, d_movx_Res, d_movy_Res
+        };
+        double* beta_laplacian[COMPACT_BETA_FIELDS] = {
+            d_movz_Res, d_Gmx_Res, d_Gmy_Res
+        };
+        const int beta_x_parity[COMPACT_BETA_FIELDS] = {-1, 1, 1};
+        const int beta_y_parity[COMPACT_BETA_FIELDS] = {1, -1, 1};
+        const int beta_z_parity[COMPACT_BETA_FIELDS] = {1, 1, -1};
+        for (int field = 0; field < COMPACT_BETA_FIELDS; ++field) {
+            beta_prepare_fields.input[field] = beta_inputs[field];
+            beta_prepare_fields.divergence[field] = beta_divergence[field];
+            beta_prepare_fields.laplacian[field] = beta_laplacian[field];
+            beta_prepare_fields.parity_x[field] = beta_x_parity[field];
+            beta_prepare_fields.parity_y[field] = beta_y_parity[field];
+            beta_prepare_fields.parity_z[field] = beta_z_parity[field];
+        }
+
+        CompactConnectionFields connection_fields{};
+        const double* connection_inputs[COMPACT_BETA_FIELDS]
+            [COMPACT_CONNECTION_COMPONENTS] = {
+                {d_Gamxxx, d_Gamxxy, d_Gamxxz, d_Gamxyy, d_Gamxyz, d_Gamxzz},
+                {d_Gamyxx, d_Gamyxy, d_Gamyxz, d_Gamyyy, d_Gamyyz, d_Gamyzz},
+                {d_Gamzxx, d_Gamzxy, d_Gamzxz, d_Gamzyy, d_Gamzyz, d_Gamzzz}
+            };
+        double* connection_outputs[COMPACT_BETA_FIELDS] = {
+            d_Ayy_rhs, d_Ayz_rhs, d_Azz_rhs
+        };
+        for (int upper = 0; upper < COMPACT_BETA_FIELDS; ++upper) {
+            for (int component = 0;
+                 component < COMPACT_CONNECTION_COMPONENTS; ++component) {
+                connection_fields.input[upper][component] =
+                    connection_inputs[upper][component];
+            }
+            connection_fields.contracted[upper] = connection_outputs[upper];
+        }
+
+        launch_rhs_beta_gamma_prepare_equatorial_compact(
+            stream, ex[0], ex[1], ex[2], d_X, d_Y, d_Z,
+            d_betax_rhs, d_betay_rhs, d_betaz_rhs,
+            d_dtSfx_rhs, d_dtSfy_rhs, d_dtSfz_rhs,
+            beta_prepare_fields, connection_fields
+        );
+    } else {
+        rhs_beta_gamma_prepare_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
+    }
     rhs_beta_gamma_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
     if (symmetry == 1) {
         CompactHessianFields hessian_fields{};
