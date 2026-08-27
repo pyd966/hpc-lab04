@@ -2,14 +2,14 @@
 
 **日期：** 2026-08-27
 **目标：** 官方 `t=100` 运行时间 `<=370s`  
-**当前版本：** P0-B 实验实现（本次提交）
+**当前版本：** P1-A 实验实现（本次提交）
 
 ## 1. 结论
 
 当前主线还没有接近 `370s`。阶段 4 基线的 `t=5` 三次结果为
-`89.150199 +/- 0.301396s`；P0-A 为 `84.722587s`，P0-B 当前为
-`83.529860 +/- 0.283895s`。按当前演化阶段近似线性外推，`t=100` 约为
-`1226s`；目标要求演化部分从约 `11.97s/单位时间` 降到约 `3.4s/单位时间`，
+`89.150199 +/- 0.301396s`；P0-A 为 `84.722587s`，P0-B 为
+`83.529860 +/- 0.283895s`，P1-A 为 `82.166688 +/- 0.084628s`。按当前演化阶段近似线性外推，P1-A 的
+`t=100` 约为 `1206s`；目标要求演化部分从约 `11.97s/单位时间` 降到约 `3.4s/单位时间`，
 约需要 `3.5x` 的整体演化加速。
 
 因此，继续优化 RK4 launch、单纯降低寄存器数或增加 stream 都不足以达到目标。
@@ -157,15 +157,31 @@ P0-A 的 source/advection 各为 `420` 次，P0-B 各为 `392` 次，而约束 k
 （正常 RHS 调用部分）、`rhs_evolution=1.699s/420`、`rhs_constraints=0.368s/126`；
 profile checker 也为 PASS。
 
-### P1-A：继续改进 RHS 的空间数据流
+### P1-A：融合 Gamma 导数与 seed 的 RHS 数据流
 
-当前已经将 RHS 拆为多个 kernel，但主要仍是同一网格上逐变量计算，并没有完整的
-spatial tile/shared-memory reuse。历史 batch kernel 实验不能直接恢复，应重新评估：
+本轮将 `rhs_gamma_derivatives_kernel` 和三个 Gamma seed kernel 合并为
+`rhs_gamma_seed_fused_kernel`（[`bssn_rhs_gpu.cu`](/home/h3250106394/lab04/src/bssn_rhs_gpu.cu:565)）。
+每个线程在寄存器中计算 `Lap`/`trK` 的三方向导数，随后直接生成
+`Gamx_rhs`、`Gamy_rhs`、`Gamz_rhs`，删除 3 次 seed launch，以及 6 个中间 scratch
+写入和读取。实现保留旧式 Gamma-y 系数 `Gamyzz * Rzz`，并验证未发生隐含
+scratch 依赖。
 
-- metric/shift Hessian 按变量组 batch；
-- 对 `d_fderivs_point` 使用空间 tile；
-- 重排 geometry、Gamma derivative、Ricci consumer 的 producer/consumer 顺序；
-- 只物化约束和后续 kernel 实际使用的中间量。
+P1-A 实测结果（2026-08-27）：
+
+| 版本 | `t=5` program mean | 结果 |
+|---|---:|---|
+| P0-B | `83.529860 +/- 0.283895s` | 3/3 PASS |
+| P1-A | `82.166688 +/- 0.084628s` | 3/3 PASS |
+
+P1-A 相对 P0-B 降低 `1.363172s`（`1.63%`）。artifact 为
+`gpu-benchmark-20260827T034330Z-64`；Nsys artifact 为 `gpu-nsys-20260827T035243Z-62`，t=1 中 fused kernel 运行 420 次、总计 `0.168677s`；旧版 derivative + 三个 seed kernel 合计约 `0.311601s`，该 producer 时间减少约 `45.8%`。三次 program cost 均通过 checker，trajectory RMS
+均为 `0`，level-0 约束最大值为 `Ham=0.025628463`、`Px=0.012645773`、
+`Py=0.012757900`、`Pz=0.025120159`。单次去除 scratch 发布的对照 artifact
+`gpu-benchmark-20260827T034007Z-63` 同样 PASS，说明这些写入不是必需副作用。
+
+该融合只减少 RHS producer 的 launch 和中间全局流量，没有引入空间 tile 或跨点
+数据复用；因此它是低风险的 P1-A 子集，后续仍需按变量组 batching、
+`d_fderivs_point` tile 和 Ricci consumer 顺序继续 profile。
 
 不要一次性物化完整 18 个 Christoffel 分量；已有实验显示 DRAM 流量会抵消寄存器收益。
 
@@ -222,7 +238,7 @@ buffer 都适合优先持久化。
 
 | 已有工作 | 判断 | 未完成部分 |
 |---|---|---|
-| RHS dataflow/fission | 有效 | 尚无完整空间 tile reuse；旧 batch 方案不应直接恢复 |
+| RHS dataflow/fission | 有效 | P1-A 已完成 Gamma 导数/seed 融合并降 1.63%；尚无完整空间 tile reuse，旧 batch 方案不应直接恢复 |
 | Advection common factors | 有效但不彻底 | KO 仍重复坐标/边界计算；helper/local array 未处理 |
 | Ricci derivative fission | 有效 | 继续做 contraction/load order，避免完整 Christoffel 物化 |
 | Stream sync reduction | 有效 | 仍有大量串行 stream wait；需要 buffer-level scheduling |
@@ -235,12 +251,12 @@ buffer 都适合优先持久化。
 ## 5. 建议的实验与验收流程
 
 1. 固定当前版本，保存生产构建 `t=5` 三次基线和当前 Nsys/NCU 指标。
-2. 先做 constraint-only RHS，再做 helper scalar/inline/local-array 实验。
+2. P0 路径已验证；下一轮优先做 P1-B prolong/restrict local-memory 实验，再回到 helper scalar/inline/local-array。
 3. 每个候选先跑 `t=1` NCU，确认 local-memory、scoreboard 和 kernel wall time 的变化。
 4. 通过后用生产构建跑 `t=5` 三次，要求所有 checker、轨迹 RMS 和约束输出一致。
 5. 对同步、AMR 和 scratch 改动分别做端到端 A/B，不以 API 调用数作为唯一成功标准。
 6. 只有当分阶段结果外推到 `t=100 <=370s` 后，才提交完整官方 `t=100` 测试。
 
-当前最值得立即尝试的组合是：**constraint-only RHS + RHS helper local-memory 消除**。
-这两项分别减少重复计算和单 kernel memory 等待，成功概率和潜在收益都高于继续调整
-RK4、增加 stream 或恢复已回滚的通用 memory pool。
+当前最值得立即尝试的是：**P1-B prolong/restrict local-memory 消除 + RHS helper local-memory 实验**。
+P0-A/P0-B/P1-A 已分别覆盖 local memory、约束重复计算和 Gamma producer launch；要继续接近
+`370s`，需要把 AMR batch 与 RHS stencil 的实际 memory 等待降下来，而不是继续增加 stream。

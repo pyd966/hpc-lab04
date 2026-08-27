@@ -559,6 +559,71 @@ __global__ void rhs_gamma_derivatives_kernel(RHS_KERNEL_PARAMS) {
     Gmy_Res[idx] = Kz;
 }
 
+// The Lap/trK derivatives are consumed immediately by all three Gamma seed
+// equations. Keep them in registers instead of publishing six intermediate
+// values to the global scratch arrays between separate launches.
+__global__ void rhs_gamma_seed_fused_kernel(RHS_KERNEL_PARAMS) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    const int j = blockIdx.y * blockDim.y + threadIdx.y;
+    const int k = blockIdx.z * blockDim.z + threadIdx.z;
+    if (i >= ex0 || j >= ex1 || k >= ex2) return;
+
+    const int idx = IDX3D(i, j, k, ex0, ex1, ex2);
+    const int dims[3] = {ex0, ex1, ex2};
+    double Lapx, Lapy, Lapz, Kx, Ky, Kz;
+    d_fderivs_point(dims, Lap, &Lapx, &Lapy, &Lapz,
+                    X, Y, Z, SYM, SYM, SYM, symmetry, lev, i, j, k);
+    d_fderivs_point(dims, trK, &Kx, &Ky, &Kz,
+                    X, Y, Z, SYM, SYM, SYM, symmetry, lev, i, j, k);
+
+    // These values are the same scratch values consumed by the old seed
+    // kernels. Keeping the aliases explicit preserves the existing equations.
+    const double chix = chi_rhs[idx], chiy = trK_rhs[idx], chiz = Lap_rhs[idx];
+    const double alpn1 = Lap[idx] + ONE;
+    const double chin1 = chi[idx] + ONE;
+    const double gupxx = betax_rhs[idx], gupxy = betay_rhs[idx], gupxz = betaz_rhs[idx];
+    const double gupyy = dtSfx_rhs[idx], gupyz = dtSfy_rhs[idx], gupzz = dtSfz_rhs[idx];
+    const double l_Rxx = Rxx[idx], l_Rxy = Rxy[idx], l_Rxz = Rxz[idx];
+    const double l_Ryy = Ryy[idx], l_Ryz = Ryz[idx], l_Rzz = Rzz[idx];
+    const double val_Sx = Sx[idx], val_Sy = Sy[idx], val_Sz = Sz[idx];
+
+    const double l_Gamxxx = Gamxxx[idx], l_Gamxxy = Gamxxy[idx], l_Gamxxz = Gamxxz[idx];
+    const double l_Gamxyy = Gamxyy[idx], l_Gamxyz = Gamxyz[idx], l_Gamxzz = Gamxzz[idx];
+    const double l_Gamyxx = Gamyxx[idx], l_Gamyxy = Gamyxy[idx], l_Gamyxz = Gamyxz[idx];
+    const double l_Gamyyy = Gamyyy[idx], l_Gamyyz = Gamyyz[idx], l_Gamyzz = Gamyzz[idx];
+    const double l_Gamzxx = Gamzxx[idx], l_Gamzxy = Gamzxy[idx], l_Gamzxz = Gamzxz[idx];
+    const double l_Gamzyy = Gamzyy[idx], l_Gamzyz = Gamzyz[idx], l_Gamzzz = Gamzzz[idx];
+
+    const double val_Gamx_rhs = -TWO * (Lapx * l_Rxx + Lapy * l_Rxy + Lapz * l_Rxz) +
+        TWO * alpn1 * (
+        -F3o2 / chin1 * (chix * l_Rxx + chiy * l_Rxy + chiz * l_Rxz) -
+        gupxx * (F2o3 * Kx + EIGHT * PI * val_Sx) -
+        gupxy * (F2o3 * Ky + EIGHT * PI * val_Sy) -
+        gupxz * (F2o3 * Kz + EIGHT * PI * val_Sz) +
+        l_Gamxxx * l_Rxx + l_Gamxyy * l_Ryy + l_Gamxzz * l_Rzz +
+        TWO * (l_Gamxxy * l_Rxy + l_Gamxxz * l_Rxz + l_Gamxyz * l_Ryz));
+    const double val_Gamy_rhs = -TWO * (Lapx * l_Rxy + Lapy * l_Ryy + Lapz * l_Ryz) +
+        TWO * alpn1 * (
+        -F3o2 / chin1 * (chix * l_Rxy + chiy * l_Ryy + chiz * l_Ryz) -
+        gupxy * (F2o3 * Kx + EIGHT * PI * val_Sx) -
+        gupyy * (F2o3 * Ky + EIGHT * PI * val_Sy) -
+        gupyz * (F2o3 * Kz + EIGHT * PI * val_Sz) +
+        l_Gamyxx * l_Rxx + l_Gamyyy * l_Ryy + l_Gamyzz * l_Rzz +
+        TWO * (l_Gamyxy * l_Rxy + l_Gamyxz * l_Rxz + l_Gamyyz * l_Ryz));
+    const double val_Gamz_rhs = -TWO * (Lapx * l_Rxz + Lapy * l_Ryz + Lapz * l_Rzz) +
+        TWO * alpn1 * (
+        -F3o2 / chin1 * (chix * l_Rxz + chiy * l_Ryz + chiz * l_Rzz) -
+        gupxz * (F2o3 * Kx + EIGHT * PI * val_Sx) -
+        gupyz * (F2o3 * Ky + EIGHT * PI * val_Sy) -
+        gupzz * (F2o3 * Kz + EIGHT * PI * val_Sz) +
+        l_Gamzxx * l_Rxx + l_Gamzyy * l_Ryy + l_Gamzzz * l_Rzz +
+        TWO * (l_Gamzxy * l_Rxy + l_Gamzxz * l_Rxz + l_Gamzyz * l_Ryz));
+
+    Gamx_rhs[idx] = val_Gamx_rhs;
+    Gamy_rhs[idx] = val_Gamy_rhs;
+    Gamz_rhs[idx] = val_Gamz_rhs;
+}
+
 __global__ void rhs_gamy_seed_kernel(
     int ex0, int ex1, int ex2, double T, double* X, double* Y, double* Z,
     double* chi, double* trK,
@@ -1524,10 +1589,7 @@ void gpu_compute_rhs_bssn_launch( // launch kernel with device pointers
     // Geometry producer must complete before the evolution consumer reads its scratch.
     rhs_geometry_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
     rhs_ricci_a_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
-    rhs_gamma_derivatives_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
-    rhs_gamx_seed_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
-    rhs_gamy_seed_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
-    rhs_gamz_seed_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
+    rhs_gamma_seed_fused_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
     // 1. Kernel 1: Derivatives & Connection Coefficients
     rhs_beta_gamma_prepare_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
     rhs_beta_gamma_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
