@@ -1658,8 +1658,78 @@ void gpu_compute_rhs_bssn_launch( // launch kernel with device pointers
     );
 
     // Geometry producer must complete before the evolution consumer reads its scratch.
-    rhs_geometry_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
-    rhs_ricci_a_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
+    if (symmetry == 1) {
+        CompactGeometryRicciFields geometry_fields{};
+        const double* gradient_inputs[COMPACT_GEOMETRY_GRADIENT_FIELDS] = {
+            d_betax, d_betay, d_betaz, d_chi
+        };
+        double* gradient_outputs[COMPACT_GEOMETRY_GRADIENT_FIELDS][3] = {
+            {d_gxx_rhs, d_gxy_rhs, d_gxz_rhs},
+            {d_gyy_rhs, d_gyz_rhs, d_gzz_rhs},
+            {d_Axx_rhs, d_Axy_rhs, d_Axz_rhs},
+            {d_chi_rhs, d_trK_rhs, d_Lap_rhs}
+        };
+        const int gradient_parity[COMPACT_GEOMETRY_GRADIENT_FIELDS][3] = {
+            {-1, 1, 1}, {1, -1, 1}, {1, 1, -1}, {1, 1, 1}
+        };
+        for (int field = 0; field < COMPACT_GEOMETRY_GRADIENT_FIELDS;
+             ++field) {
+            geometry_fields.gradient_input[field] = gradient_inputs[field];
+            for (int axis = 0; axis < 3; ++axis) {
+                geometry_fields.gradient_output[field][axis] =
+                    gradient_outputs[field][axis];
+                geometry_fields.gradient_parity[field][axis] =
+                    gradient_parity[field][axis];
+            }
+        }
+
+        const double* metric_inputs[COMPACT_GEOMETRY_METRIC_FIELDS] = {
+            d_dxx, d_gxy, d_gxz, d_dyy, d_gyz, d_dzz
+        };
+        const int metric_parity[COMPACT_GEOMETRY_METRIC_FIELDS][3] = {
+            {1, 1, 1}, {-1, -1, 1}, {-1, 1, -1},
+            {1, 1, 1}, {1, -1, -1}, {1, 1, 1}
+        };
+        const double* a_inputs[COMPACT_GEOMETRY_METRIC_FIELDS] = {
+            d_Axx, d_Axy, d_Axz, d_Ayy, d_Ayz, d_Azz
+        };
+        double* inverse_metric[COMPACT_GEOMETRY_METRIC_FIELDS] = {
+            d_betax_rhs, d_betay_rhs, d_betaz_rhs,
+            d_dtSfx_rhs, d_dtSfy_rhs, d_dtSfz_rhs
+        };
+        double* ricci[COMPACT_GEOMETRY_METRIC_FIELDS] = {
+            d_Rxx, d_Rxy, d_Rxz, d_Ryy, d_Ryz, d_Rzz
+        };
+        double* connection[3][COMPACT_GEOMETRY_METRIC_FIELDS] = {
+            {d_Gamxxx, d_Gamxxy, d_Gamxxz,
+             d_Gamxyy, d_Gamxyz, d_Gamxzz},
+            {d_Gamyxx, d_Gamyxy, d_Gamyxz,
+             d_Gamyyy, d_Gamyyz, d_Gamyzz},
+            {d_Gamzxx, d_Gamzxy, d_Gamzxz,
+             d_Gamzyy, d_Gamzyz, d_Gamzzz}
+        };
+        for (int component = 0;
+             component < COMPACT_GEOMETRY_METRIC_FIELDS; ++component) {
+            geometry_fields.metric[component] = metric_inputs[component];
+            geometry_fields.a[component] = a_inputs[component];
+            geometry_fields.inverse_metric[component] =
+                inverse_metric[component];
+            geometry_fields.ricci[component] = ricci[component];
+            for (int axis = 0; axis < 3; ++axis) {
+                geometry_fields.metric_parity[component][axis] =
+                    metric_parity[component][axis];
+                geometry_fields.connection[axis][component] =
+                    connection[axis][component];
+            }
+        }
+        launch_rhs_geometry_ricci_a_equatorial_compact(
+            stream, ex[0], ex[1], ex[2], d_X, d_Y, d_Z,
+            geometry_fields
+        );
+    } else {
+        rhs_geometry_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
+        rhs_ricci_a_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
+    }
     rhs_gamma_seed_fused_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
     // 1. Kernel 1: Derivatives & Connection Coefficients
     if (symmetry == 1) {

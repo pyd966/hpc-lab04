@@ -183,6 +183,311 @@ __device__ __forceinline__ void compact_first_derivatives_from_tile(
 #undef FIRST_AT
 }
 
+constexpr int COMPACT_GEOMETRY_GRADIENT_FIELDS = 4;
+constexpr int COMPACT_GEOMETRY_METRIC_FIELDS = 6;
+
+struct CompactGeometryRicciFields {
+    const double* gradient_input[COMPACT_GEOMETRY_GRADIENT_FIELDS];
+    double* gradient_output[COMPACT_GEOMETRY_GRADIENT_FIELDS][3];
+    int gradient_parity[COMPACT_GEOMETRY_GRADIENT_FIELDS][3];
+    const double* metric[COMPACT_GEOMETRY_METRIC_FIELDS];
+    int metric_parity[COMPACT_GEOMETRY_METRIC_FIELDS][3];
+    const double* a[COMPACT_GEOMETRY_METRIC_FIELDS];
+    double* connection[3][COMPACT_GEOMETRY_METRIC_FIELDS];
+    double* inverse_metric[COMPACT_GEOMETRY_METRIC_FIELDS];
+    double* ricci[COMPACT_GEOMETRY_METRIC_FIELDS];
+};
+
+__global__ void rhs_geometry_ricci_a_equatorial_compact_kernel(
+    int ex0, int ex1, int ex2,
+    const double* X, const double* Y, const double* Z,
+    CompactGeometryRicciFields fields
+) {
+    const int base_i = blockIdx.x * COMPACT_HESSIAN_BX;
+    const int base_j = blockIdx.y * COMPACT_HESSIAN_BY;
+    const int base_k = blockIdx.z * COMPACT_HESSIAN_BZ;
+    const bool block_interior =
+        base_i >= COMPACT_HESSIAN_RADIUS &&
+        base_j >= COMPACT_HESSIAN_RADIUS &&
+        base_k >= COMPACT_HESSIAN_RADIUS &&
+        base_i + COMPACT_HESSIAN_BX + COMPACT_HESSIAN_RADIUS <= ex0 &&
+        base_j + COMPACT_HESSIAN_BY + COMPACT_HESSIAN_RADIUS <= ex1 &&
+        base_k + COMPACT_HESSIAN_BZ + COMPACT_HESSIAN_RADIUS <= ex2;
+
+    const int tx = threadIdx.x;
+    const int ty = threadIdx.y;
+    const int tz = threadIdx.z;
+    const int tid = tx + COMPACT_HESSIAN_BX *
+        (ty + COMPACT_HESSIAN_BY * tz);
+    const int threads = COMPACT_HESSIAN_BX *
+        COMPACT_HESSIAN_BY * COMPACT_HESSIAN_BZ;
+    const int i = base_i + tx;
+    const int j = base_j + ty;
+    const int k = base_k + tz;
+    const bool valid = i < ex0 && j < ex1 && k < ex2;
+    const bool active = valid && i < ex0 - 1 && j < ex1 - 1 && k < ex2 - 1;
+    const int idx = valid ? i + ex0 * (j + ex1 * k) : 0;
+    const int center_index = compact_hessian_tile_index(
+        tx + COMPACT_HESSIAN_RADIUS,
+        ty + COMPACT_HESSIAN_RADIUS,
+        tz + COMPACT_HESSIAN_RADIUS
+    );
+
+    __shared__ double tile[COMPACT_HESSIAN_TILE_SIZE];
+    __shared__ double scales[18];
+    __shared__ int kmin_shared;
+    if (tid == 0) {
+        const double dx = X[1] - X[0];
+        const double dy = Y[1] - Y[0];
+        const double dz = Z[1] - Z[0];
+        scales[12] = (1.0 / 12.0) / dx;
+        scales[13] = (1.0 / 12.0) / dy;
+        scales[14] = (1.0 / 12.0) / dz;
+        scales[15] = (1.0 / 2.0) / dx;
+        scales[16] = (1.0 / 2.0) / dy;
+        scales[17] = (1.0 / 2.0) / dz;
+        kmin_shared = (fabs(Z[0]) < dz) ? -2 : 0;
+    }
+
+#pragma unroll 1
+    for (int field_index = 0;
+         field_index < COMPACT_GEOMETRY_GRADIENT_FIELDS;
+         ++field_index) {
+        const double* field = fields.gradient_input[field_index];
+        for (int p = tid; p < COMPACT_HESSIAN_LOGICAL_SIZE; p += threads) {
+            const int tile_i = p % COMPACT_HESSIAN_SX;
+            const int q = p / COMPACT_HESSIAN_SX;
+            const int tile_j = q % COMPACT_HESSIAN_SY;
+            const int tile_k = q / COMPACT_HESSIAN_SY;
+            const int gi = base_i + tile_i - COMPACT_HESSIAN_RADIUS;
+            const int gj = base_j + tile_j - COMPACT_HESSIAN_RADIUS;
+            const int gk = base_k + tile_k - COMPACT_HESSIAN_RADIUS;
+            const int tile_index = compact_hessian_tile_index(
+                tile_i, tile_j, tile_k
+            );
+            tile[tile_index] = block_interior
+                ? field[gi + ex0 * (gj + ex1 * gk)]
+                : compact_hessian_symmetry_load(
+                    field, gi, gj, gk, ex0, ex1, ex2,
+                    fields.gradient_parity[field_index][0],
+                    fields.gradient_parity[field_index][1],
+                    fields.gradient_parity[field_index][2]
+                );
+        }
+        __syncthreads();
+        if (valid) {
+            double fx, fy, fz;
+            compact_first_derivatives_from_tile(
+                tile, center_index, active, i, j, k,
+                ex0, ex1, ex2, kmin_shared, scales,
+                fx, fy, fz
+            );
+            fields.gradient_output[field_index][0][idx] = fx;
+            fields.gradient_output[field_index][1][idx] = fy;
+            fields.gradient_output[field_index][2][idx] = fz;
+        }
+        if (field_index + 1 < COMPACT_GEOMETRY_GRADIENT_FIELDS) {
+            __syncthreads();
+        }
+    }
+    __syncthreads();
+
+    double gxxx = 0.0, gxxy = 0.0, gxxz = 0.0;
+    double gxyx = 0.0, gxyy = 0.0, gxyz = 0.0;
+    double gxzx = 0.0, gxzy = 0.0, gxzz = 0.0;
+    double gyyx = 0.0, gyyy = 0.0, gyyz = 0.0;
+    double gyzx = 0.0, gyzy = 0.0, gyzz = 0.0;
+    double gzzx = 0.0, gzzy = 0.0, gzzz = 0.0;
+
+#pragma unroll 1
+    for (int field_index = 0;
+         field_index < COMPACT_GEOMETRY_METRIC_FIELDS;
+         ++field_index) {
+        const double* field = fields.metric[field_index];
+        for (int p = tid; p < COMPACT_HESSIAN_LOGICAL_SIZE; p += threads) {
+            const int tile_i = p % COMPACT_HESSIAN_SX;
+            const int q = p / COMPACT_HESSIAN_SX;
+            const int tile_j = q % COMPACT_HESSIAN_SY;
+            const int tile_k = q / COMPACT_HESSIAN_SY;
+            const int gi = base_i + tile_i - COMPACT_HESSIAN_RADIUS;
+            const int gj = base_j + tile_j - COMPACT_HESSIAN_RADIUS;
+            const int gk = base_k + tile_k - COMPACT_HESSIAN_RADIUS;
+            const int tile_index = compact_hessian_tile_index(
+                tile_i, tile_j, tile_k
+            );
+            tile[tile_index] = block_interior
+                ? field[gi + ex0 * (gj + ex1 * gk)]
+                : compact_hessian_symmetry_load(
+                    field, gi, gj, gk, ex0, ex1, ex2,
+                    fields.metric_parity[field_index][0],
+                    fields.metric_parity[field_index][1],
+                    fields.metric_parity[field_index][2]
+                );
+        }
+        __syncthreads();
+        if (valid) {
+            double fx, fy, fz;
+            compact_first_derivatives_from_tile(
+                tile, center_index, active, i, j, k,
+                ex0, ex1, ex2, kmin_shared, scales,
+                fx, fy, fz
+            );
+            switch (field_index) {
+                case 0: gxxx = fx; gxxy = fy; gxxz = fz; break;
+                case 1: gxyx = fx; gxyy = fy; gxyz = fz; break;
+                case 2: gxzx = fx; gxzy = fy; gxzz = fz; break;
+                case 3: gyyx = fx; gyyy = fy; gyyz = fz; break;
+                case 4: gyzx = fx; gyzy = fy; gyzz = fz; break;
+                default: gzzx = fx; gzzy = fy; gzzz = fz; break;
+            }
+        }
+        if (field_index + 1 < COMPACT_GEOMETRY_METRIC_FIELDS) {
+            __syncthreads();
+        }
+    }
+
+    if (valid) {
+        const double l_gxx = fields.metric[0][idx] + 1.0;
+        const double l_gxy = fields.metric[1][idx];
+        const double l_gxz = fields.metric[2][idx];
+        const double l_gyy = fields.metric[3][idx] + 1.0;
+        const double l_gyz = fields.metric[4][idx];
+        const double l_gzz = fields.metric[5][idx] + 1.0;
+        const double detg = l_gxx * (l_gyy * l_gzz - l_gyz * l_gyz)
+                          - l_gxy * (l_gxy * l_gzz - l_gyz * l_gxz)
+                          + l_gxz * (l_gxy * l_gyz - l_gyy * l_gxz);
+        const double gupxx = (l_gyy * l_gzz - l_gyz * l_gyz) / detg;
+        const double gupxy = -(l_gxy * l_gzz - l_gyz * l_gxz) / detg;
+        const double gupxz = (l_gxy * l_gyz - l_gyy * l_gxz) / detg;
+        const double gupyy = (l_gxx * l_gzz - l_gxz * l_gxz) / detg;
+        const double gupyz = -(l_gxx * l_gyz - l_gxy * l_gxz) / detg;
+        const double gupzz = (l_gxx * l_gyy - l_gxy * l_gxy) / detg;
+
+        fields.inverse_metric[0][idx] = gupxx;
+        fields.inverse_metric[1][idx] = gupxy;
+        fields.inverse_metric[2][idx] = gupxz;
+        fields.inverse_metric[3][idx] = gupyy;
+        fields.inverse_metric[4][idx] = gupyz;
+        fields.inverse_metric[5][idx] = gupzz;
+
+        const double l_Axx = fields.a[0][idx];
+        const double l_Axy = fields.a[1][idx];
+        const double l_Axz = fields.a[2][idx];
+        const double l_Ayy = fields.a[3][idx];
+        const double l_Ayz = fields.a[4][idx];
+        const double l_Azz = fields.a[5][idx];
+        fields.ricci[0][idx] =
+            gupxx * gupxx * l_Axx + gupxy * gupxy * l_Ayy +
+            gupxz * gupxz * l_Azz +
+            2.0 * (gupxx * gupxy * l_Axy + gupxx * gupxz * l_Axz +
+                   gupxy * gupxz * l_Ayz);
+        fields.ricci[3][idx] =
+            gupxy * gupxy * l_Axx + gupyy * gupyy * l_Ayy +
+            gupyz * gupyz * l_Azz +
+            2.0 * (gupxy * gupyy * l_Axy + gupxy * gupyz * l_Axz +
+                   gupyy * gupyz * l_Ayz);
+        fields.ricci[5][idx] =
+            gupxz * gupxz * l_Axx + gupyz * gupyz * l_Ayy +
+            gupzz * gupzz * l_Azz +
+            2.0 * (gupxz * gupyz * l_Axy + gupxz * gupzz * l_Axz +
+                   gupyz * gupzz * l_Ayz);
+        fields.ricci[1][idx] =
+            gupxx * gupxy * l_Axx + gupxy * gupyy * l_Ayy +
+            gupxz * gupyz * l_Azz +
+            (gupxx * gupyy + gupxy * gupxy) * l_Axy +
+            (gupxx * gupyz + gupxz * gupxy) * l_Axz +
+            (gupxy * gupyz + gupxz * gupyy) * l_Ayz;
+        fields.ricci[2][idx] =
+            gupxx * gupxz * l_Axx + gupxy * gupyz * l_Ayy +
+            gupxz * gupzz * l_Azz +
+            (gupxx * gupyz + gupxy * gupxz) * l_Axy +
+            (gupxx * gupzz + gupxz * gupxz) * l_Axz +
+            (gupxy * gupzz + gupxz * gupyz) * l_Ayz;
+        fields.ricci[4][idx] =
+            gupxy * gupxz * l_Axx + gupyy * gupyz * l_Ayy +
+            gupyz * gupzz * l_Azz +
+            (gupxy * gupyz + gupyy * gupxz) * l_Axy +
+            (gupxy * gupzz + gupyz * gupxz) * l_Axz +
+            (gupyy * gupzz + gupyz * gupyz) * l_Ayz;
+
+        fields.connection[0][0][idx] = 0.5 * (
+            gupxx * gxxx + gupxy * (2.0 * gxyx - gxxy) +
+            gupxz * (2.0 * gxzx - gxxz));
+        fields.connection[1][0][idx] = 0.5 * (
+            gupxy * gxxx + gupyy * (2.0 * gxyx - gxxy) +
+            gupyz * (2.0 * gxzx - gxxz));
+        fields.connection[2][0][idx] = 0.5 * (
+            gupxz * gxxx + gupyz * (2.0 * gxyx - gxxy) +
+            gupzz * (2.0 * gxzx - gxxz));
+        fields.connection[0][3][idx] = 0.5 * (
+            gupxx * (2.0 * gxyy - gyyx) + gupxy * gyyy +
+            gupxz * (2.0 * gyzy - gyyz));
+        fields.connection[1][3][idx] = 0.5 * (
+            gupxy * (2.0 * gxyy - gyyx) + gupyy * gyyy +
+            gupyz * (2.0 * gyzy - gyyz));
+        fields.connection[2][3][idx] = 0.5 * (
+            gupxz * (2.0 * gxyy - gyyx) + gupyz * gyyy +
+            gupzz * (2.0 * gyzy - gyyz));
+        fields.connection[0][5][idx] = 0.5 * (
+            gupxx * (2.0 * gxzz - gzzx) +
+            gupxy * (2.0 * gyzz - gzzy) + gupxz * gzzz);
+        fields.connection[1][5][idx] = 0.5 * (
+            gupxy * (2.0 * gxzz - gzzx) +
+            gupyy * (2.0 * gyzz - gzzy) + gupyz * gzzz);
+        fields.connection[2][5][idx] = 0.5 * (
+            gupxz * (2.0 * gxzz - gzzx) +
+            gupyz * (2.0 * gyzz - gzzy) + gupzz * gzzz);
+        fields.connection[0][1][idx] = 0.5 * (
+            gupxx * gxxy + gupxy * gyyx +
+            gupxz * (gxzy + gyzx - gxyz));
+        fields.connection[1][1][idx] = 0.5 * (
+            gupxy * gxxy + gupyy * gyyx +
+            gupyz * (gxzy + gyzx - gxyz));
+        fields.connection[2][1][idx] = 0.5 * (
+            gupxz * gxxy + gupyz * gyyx +
+            gupzz * (gxzy + gyzx - gxyz));
+        fields.connection[0][2][idx] = 0.5 * (
+            gupxx * gxxz + gupxy * (gxyz + gyzx - gxzy) +
+            gupxz * gzzx);
+        fields.connection[1][2][idx] = 0.5 * (
+            gupxy * gxxz + gupyy * (gxyz + gyzx - gxzy) +
+            gupyz * gzzx);
+        fields.connection[2][2][idx] = 0.5 * (
+            gupxz * gxxz + gupyz * (gxyz + gyzx - gxzy) +
+            gupzz * gzzx);
+        fields.connection[0][4][idx] = 0.5 * (
+            gupxx * (gxyz + gxzy - gyzx) + gupxy * gyyz +
+            gupxz * gzzy);
+        fields.connection[1][4][idx] = 0.5 * (
+            gupxy * (gxyz + gxzy - gyzx) + gupyy * gyyz +
+            gupyz * gzzy);
+        fields.connection[2][4][idx] = 0.5 * (
+            gupxz * (gxyz + gxzy - gyzx) + gupyz * gyyz +
+            gupzz * gzzy);
+    }
+}
+
+inline void launch_rhs_geometry_ricci_a_equatorial_compact(
+    cudaStream_t stream,
+    int ex0, int ex1, int ex2,
+    const double* X, const double* Y, const double* Z,
+    const CompactGeometryRicciFields& fields
+) {
+    const dim3 block(
+        COMPACT_HESSIAN_BX,
+        COMPACT_HESSIAN_BY,
+        COMPACT_HESSIAN_BZ
+    );
+    const dim3 grid(
+        (ex0 + block.x - 1) / block.x,
+        (ex1 + block.y - 1) / block.y,
+        (ex2 + block.z - 1) / block.z
+    );
+    rhs_geometry_ricci_a_equatorial_compact_kernel<<<grid, block, 0, stream>>>(
+        ex0, ex1, ex2, X, Y, Z, fields
+    );
+}
+
 // Compute the same fourth-order Hessian (with the same second-order boundary
 // fallback) as d_fdderivs_point, but source all stencil values from one tile.
 __global__ void rhs_evolution_equatorial_compact_kernel(
