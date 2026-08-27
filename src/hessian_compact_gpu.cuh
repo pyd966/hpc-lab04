@@ -149,6 +149,40 @@ __device__ __forceinline__ void compact_hessian_derivatives_from_tile(
 #undef HESS_AT
 }
 
+__device__ __forceinline__ void compact_first_derivatives_from_tile(
+    const double* tile, int center_index,
+    bool active, int i, int j, int k,
+    int ex0, int ex1, int ex2, int kmin,
+    const double* scales,
+    double& fx, double& fy, double& fz
+) {
+    fx = 0.0;
+    fy = 0.0;
+    fz = 0.0;
+
+#define FIRST_AT(di, dj, dk) \
+    compact_hessian_tile_at(tile, center_index, (di), (dj), (dk))
+    if (active &&
+        i + 2 <= ex0 - 1 && i - 2 >= 0 &&
+        j + 2 <= ex1 - 1 && j - 2 >= 0 &&
+        k + 2 <= ex2 - 1 && k - 2 >= kmin) {
+        fx = scales[12] * (FIRST_AT(-2, 0, 0) - 8.0 * FIRST_AT(-1, 0, 0)
+            + 8.0 * FIRST_AT(1, 0, 0) - FIRST_AT(2, 0, 0));
+        fy = scales[13] * (FIRST_AT(0, -2, 0) - 8.0 * FIRST_AT(0, -1, 0)
+            + 8.0 * FIRST_AT(0, 1, 0) - FIRST_AT(0, 2, 0));
+        fz = scales[14] * (FIRST_AT(0, 0, -2) - 8.0 * FIRST_AT(0, 0, -1)
+            + 8.0 * FIRST_AT(0, 0, 1) - FIRST_AT(0, 0, 2));
+    } else if (active &&
+        i + 1 <= ex0 - 1 && i - 1 >= 0 &&
+        j + 1 <= ex1 - 1 && j - 1 >= 0 &&
+        k + 1 <= ex2 - 1 && k - 1 >= kmin) {
+        fx = scales[15] * (-FIRST_AT(-1, 0, 0) + FIRST_AT(1, 0, 0));
+        fy = scales[16] * (-FIRST_AT(0, -1, 0) + FIRST_AT(0, 1, 0));
+        fz = scales[17] * (-FIRST_AT(0, 0, -1) + FIRST_AT(0, 0, 1));
+    }
+#undef FIRST_AT
+}
+
 // Compute the same fourth-order Hessian (with the same second-order boundary
 // fallback) as d_fdderivs_point, but source all stencil values from one tile.
 __global__ void rhs_evolution_equatorial_compact_kernel(
@@ -470,6 +504,311 @@ inline void launch_rhs_beta_gamma_prepare_equatorial_compact(
         ex0, ex1, ex2, X, Y, Z,
         gupxx, gupxy, gupxz, gupyy, gupyz, gupzz,
         beta_fields, connection_fields
+    );
+}
+
+constexpr int COMPACT_TENSOR_COMPONENTS = 6;
+
+struct CompactChiHessianFields {
+    const double* gradient[3];
+    const double* connection[3][COMPACT_TENSOR_COMPONENTS];
+    double* covariant_hessian[COMPACT_TENSOR_COMPONENTS];
+};
+
+struct CompactLapseHessianFields {
+    const double* connection[3][COMPACT_TENSOR_COMPONENTS];
+    const double* inverse_metric[COMPACT_TENSOR_COMPONENTS];
+    double* covariant_hessian[COMPACT_TENSOR_COMPONENTS];
+    double* trace;
+};
+
+__global__ void rhs_source_chi_hessian_equatorial_compact_kernel(
+    int ex0, int ex1, int ex2,
+    const double* X, const double* Y, const double* Z,
+    const double* chi,
+    CompactChiHessianFields fields
+) {
+    const int base_i = blockIdx.x * COMPACT_HESSIAN_BX;
+    const int base_j = blockIdx.y * COMPACT_HESSIAN_BY;
+    const int base_k = blockIdx.z * COMPACT_HESSIAN_BZ;
+    const bool block_interior =
+        base_i >= COMPACT_HESSIAN_RADIUS &&
+        base_j >= COMPACT_HESSIAN_RADIUS &&
+        base_k >= COMPACT_HESSIAN_RADIUS &&
+        base_i + COMPACT_HESSIAN_BX + COMPACT_HESSIAN_RADIUS <= ex0 &&
+        base_j + COMPACT_HESSIAN_BY + COMPACT_HESSIAN_RADIUS <= ex1 &&
+        base_k + COMPACT_HESSIAN_BZ + COMPACT_HESSIAN_RADIUS <= ex2;
+
+    const int tx = threadIdx.x;
+    const int ty = threadIdx.y;
+    const int tz = threadIdx.z;
+    const int tid = tx + COMPACT_HESSIAN_BX *
+        (ty + COMPACT_HESSIAN_BY * tz);
+    const int threads = COMPACT_HESSIAN_BX *
+        COMPACT_HESSIAN_BY * COMPACT_HESSIAN_BZ;
+    const int i = base_i + tx;
+    const int j = base_j + ty;
+    const int k = base_k + tz;
+    const bool valid = i < ex0 && j < ex1 && k < ex2;
+    const bool active = valid && i < ex0 - 1 && j < ex1 - 1 && k < ex2 - 1;
+    const int idx = valid ? i + ex0 * (j + ex1 * k) : 0;
+
+    __shared__ double tile[COMPACT_HESSIAN_TILE_SIZE];
+    __shared__ double scales[12];
+    __shared__ int kmin_shared;
+    if (tid == 0) {
+        const double dx = X[1] - X[0];
+        const double dy = Y[1] - Y[0];
+        const double dz = Z[1] - Z[0];
+        scales[0] = 1.0 / (dx * dx);
+        scales[1] = 1.0 / (dy * dy);
+        scales[2] = 1.0 / (dz * dz);
+        scales[3] = (1.0 / 12.0) / (dx * dx);
+        scales[4] = (1.0 / 12.0) / (dy * dy);
+        scales[5] = (1.0 / 12.0) / (dz * dz);
+        scales[6] = 0.25 / (dx * dy);
+        scales[7] = 0.25 / (dx * dz);
+        scales[8] = 0.25 / (dy * dz);
+        scales[9] = (1.0 / 144.0) / (dx * dy);
+        scales[10] = (1.0 / 144.0) / (dx * dz);
+        scales[11] = (1.0 / 144.0) / (dy * dz);
+        kmin_shared = (fabs(Z[0]) < dz) ? -2 : 0;
+    }
+
+    for (int p = tid; p < COMPACT_HESSIAN_LOGICAL_SIZE; p += threads) {
+        const int tile_i = p % COMPACT_HESSIAN_SX;
+        const int q = p / COMPACT_HESSIAN_SX;
+        const int tile_j = q % COMPACT_HESSIAN_SY;
+        const int tile_k = q / COMPACT_HESSIAN_SY;
+        const int gi = base_i + tile_i - COMPACT_HESSIAN_RADIUS;
+        const int gj = base_j + tile_j - COMPACT_HESSIAN_RADIUS;
+        const int gk = base_k + tile_k - COMPACT_HESSIAN_RADIUS;
+        const int tile_index = compact_hessian_tile_index(
+            tile_i, tile_j, tile_k
+        );
+        tile[tile_index] = block_interior
+            ? chi[gi + ex0 * (gj + ex1 * gk)]
+            : compact_hessian_symmetry_load(
+                chi, gi, gj, gk, ex0, ex1, ex2, 1, 1, 1
+            );
+    }
+    __syncthreads();
+
+    if (valid) {
+        double fxx, fxy, fxz, fyy, fyz, fzz;
+        compact_hessian_derivatives_from_tile(
+            tile,
+            compact_hessian_tile_index(
+                tx + COMPACT_HESSIAN_RADIUS,
+                ty + COMPACT_HESSIAN_RADIUS,
+                tz + COMPACT_HESSIAN_RADIUS
+            ),
+            active, i, j, k, ex0, ex1, ex2, kmin_shared, scales,
+            fxx, fxy, fxz, fyy, fyz, fzz
+        );
+        const double chix = fields.gradient[0][idx];
+        const double chiy = fields.gradient[1][idx];
+        const double chiz = fields.gradient[2][idx];
+        fxx -= fields.connection[0][0][idx] * chix +
+               fields.connection[1][0][idx] * chiy +
+               fields.connection[2][0][idx] * chiz;
+        fxy -= fields.connection[0][1][idx] * chix +
+               fields.connection[1][1][idx] * chiy +
+               fields.connection[2][1][idx] * chiz;
+        fxz -= fields.connection[0][2][idx] * chix +
+               fields.connection[1][2][idx] * chiy +
+               fields.connection[2][2][idx] * chiz;
+        fyy -= fields.connection[0][3][idx] * chix +
+               fields.connection[1][3][idx] * chiy +
+               fields.connection[2][3][idx] * chiz;
+        fyz -= fields.connection[0][4][idx] * chix +
+               fields.connection[1][4][idx] * chiy +
+               fields.connection[2][4][idx] * chiz;
+        fzz -= fields.connection[0][5][idx] * chix +
+               fields.connection[1][5][idx] * chiy +
+               fields.connection[2][5][idx] * chiz;
+        fields.covariant_hessian[0][idx] = fxx;
+        fields.covariant_hessian[1][idx] = fxy;
+        fields.covariant_hessian[2][idx] = fxz;
+        fields.covariant_hessian[3][idx] = fyy;
+        fields.covariant_hessian[4][idx] = fyz;
+        fields.covariant_hessian[5][idx] = fzz;
+    }
+}
+
+inline void launch_rhs_source_chi_hessian_equatorial_compact(
+    cudaStream_t stream,
+    int ex0, int ex1, int ex2,
+    const double* X, const double* Y, const double* Z,
+    const double* chi,
+    const CompactChiHessianFields& fields
+) {
+    const dim3 block(
+        COMPACT_HESSIAN_BX,
+        COMPACT_HESSIAN_BY,
+        COMPACT_HESSIAN_BZ
+    );
+    const dim3 grid(
+        (ex0 + block.x - 1) / block.x,
+        (ex1 + block.y - 1) / block.y,
+        (ex2 + block.z - 1) / block.z
+    );
+    rhs_source_chi_hessian_equatorial_compact_kernel<<<grid, block, 0, stream>>>(
+        ex0, ex1, ex2, X, Y, Z, chi, fields
+    );
+}
+
+__global__ void rhs_source_lapse_equatorial_compact_kernel(
+    int ex0, int ex1, int ex2,
+    const double* X, const double* Y, const double* Z,
+    const double* lapse,
+    CompactLapseHessianFields fields
+) {
+    const int base_i = blockIdx.x * COMPACT_HESSIAN_BX;
+    const int base_j = blockIdx.y * COMPACT_HESSIAN_BY;
+    const int base_k = blockIdx.z * COMPACT_HESSIAN_BZ;
+    const bool block_interior =
+        base_i >= COMPACT_HESSIAN_RADIUS &&
+        base_j >= COMPACT_HESSIAN_RADIUS &&
+        base_k >= COMPACT_HESSIAN_RADIUS &&
+        base_i + COMPACT_HESSIAN_BX + COMPACT_HESSIAN_RADIUS <= ex0 &&
+        base_j + COMPACT_HESSIAN_BY + COMPACT_HESSIAN_RADIUS <= ex1 &&
+        base_k + COMPACT_HESSIAN_BZ + COMPACT_HESSIAN_RADIUS <= ex2;
+
+    const int tx = threadIdx.x;
+    const int ty = threadIdx.y;
+    const int tz = threadIdx.z;
+    const int tid = tx + COMPACT_HESSIAN_BX *
+        (ty + COMPACT_HESSIAN_BY * tz);
+    const int threads = COMPACT_HESSIAN_BX *
+        COMPACT_HESSIAN_BY * COMPACT_HESSIAN_BZ;
+    const int i = base_i + tx;
+    const int j = base_j + ty;
+    const int k = base_k + tz;
+    const bool valid = i < ex0 && j < ex1 && k < ex2;
+    const bool active = valid && i < ex0 - 1 && j < ex1 - 1 && k < ex2 - 1;
+    const int idx = valid ? i + ex0 * (j + ex1 * k) : 0;
+
+    __shared__ double tile[COMPACT_HESSIAN_TILE_SIZE];
+    __shared__ double scales[18];
+    __shared__ int kmin_shared;
+    if (tid == 0) {
+        const double dx = X[1] - X[0];
+        const double dy = Y[1] - Y[0];
+        const double dz = Z[1] - Z[0];
+        scales[0] = 1.0 / (dx * dx);
+        scales[1] = 1.0 / (dy * dy);
+        scales[2] = 1.0 / (dz * dz);
+        scales[3] = (1.0 / 12.0) / (dx * dx);
+        scales[4] = (1.0 / 12.0) / (dy * dy);
+        scales[5] = (1.0 / 12.0) / (dz * dz);
+        scales[6] = 0.25 / (dx * dy);
+        scales[7] = 0.25 / (dx * dz);
+        scales[8] = 0.25 / (dy * dz);
+        scales[9] = (1.0 / 144.0) / (dx * dy);
+        scales[10] = (1.0 / 144.0) / (dx * dz);
+        scales[11] = (1.0 / 144.0) / (dy * dz);
+        scales[12] = (1.0 / 12.0) / dx;
+        scales[13] = (1.0 / 12.0) / dy;
+        scales[14] = (1.0 / 12.0) / dz;
+        scales[15] = (1.0 / 2.0) / dx;
+        scales[16] = (1.0 / 2.0) / dy;
+        scales[17] = (1.0 / 2.0) / dz;
+        kmin_shared = (fabs(Z[0]) < dz) ? -2 : 0;
+    }
+
+    for (int p = tid; p < COMPACT_HESSIAN_LOGICAL_SIZE; p += threads) {
+        const int tile_i = p % COMPACT_HESSIAN_SX;
+        const int q = p / COMPACT_HESSIAN_SX;
+        const int tile_j = q % COMPACT_HESSIAN_SY;
+        const int tile_k = q / COMPACT_HESSIAN_SY;
+        const int gi = base_i + tile_i - COMPACT_HESSIAN_RADIUS;
+        const int gj = base_j + tile_j - COMPACT_HESSIAN_RADIUS;
+        const int gk = base_k + tile_k - COMPACT_HESSIAN_RADIUS;
+        const int tile_index = compact_hessian_tile_index(
+            tile_i, tile_j, tile_k
+        );
+        tile[tile_index] = block_interior
+            ? lapse[gi + ex0 * (gj + ex1 * gk)]
+            : compact_hessian_symmetry_load(
+                lapse, gi, gj, gk, ex0, ex1, ex2, 1, 1, 1
+            );
+    }
+    __syncthreads();
+
+    if (valid) {
+        const int center_index = compact_hessian_tile_index(
+            tx + COMPACT_HESSIAN_RADIUS,
+            ty + COMPACT_HESSIAN_RADIUS,
+            tz + COMPACT_HESSIAN_RADIUS
+        );
+        double Lapx, Lapy, Lapz;
+        compact_first_derivatives_from_tile(
+            tile, center_index, active, i, j, k,
+            ex0, ex1, ex2, kmin_shared, scales,
+            Lapx, Lapy, Lapz
+        );
+        double fxx, fxy, fxz, fyy, fyz, fzz;
+        compact_hessian_derivatives_from_tile(
+            tile, center_index, active, i, j, k,
+            ex0, ex1, ex2, kmin_shared, scales,
+            fxx, fxy, fxz, fyy, fyz, fzz
+        );
+        fxx -= fields.connection[0][0][idx] * Lapx +
+               fields.connection[1][0][idx] * Lapy +
+               fields.connection[2][0][idx] * Lapz;
+        fyy -= fields.connection[0][3][idx] * Lapx +
+               fields.connection[1][3][idx] * Lapy +
+               fields.connection[2][3][idx] * Lapz;
+        fzz -= fields.connection[0][5][idx] * Lapx +
+               fields.connection[1][5][idx] * Lapy +
+               fields.connection[2][5][idx] * Lapz;
+        fxy -= fields.connection[0][1][idx] * Lapx +
+               fields.connection[1][1][idx] * Lapy +
+               fields.connection[2][1][idx] * Lapz;
+        fxz -= fields.connection[0][2][idx] * Lapx +
+               fields.connection[1][2][idx] * Lapy +
+               fields.connection[2][2][idx] * Lapz;
+        fyz -= fields.connection[0][4][idx] * Lapx +
+               fields.connection[1][4][idx] * Lapy +
+               fields.connection[2][4][idx] * Lapz;
+        const double gupxx = fields.inverse_metric[0][idx];
+        const double gupxy = fields.inverse_metric[1][idx];
+        const double gupxz = fields.inverse_metric[2][idx];
+        const double gupyy = fields.inverse_metric[3][idx];
+        const double gupyz = fields.inverse_metric[4][idx];
+        const double gupzz = fields.inverse_metric[5][idx];
+        const double trace = gupxx * fxx + gupyy * fyy + gupzz * fzz +
+                             2.0 * (gupxy * fxy + gupxz * fxz + gupyz * fyz);
+        fields.covariant_hessian[0][idx] = fxx;
+        fields.covariant_hessian[1][idx] = fxy;
+        fields.covariant_hessian[2][idx] = fxz;
+        fields.covariant_hessian[3][idx] = fyy;
+        fields.covariant_hessian[4][idx] = fyz;
+        fields.covariant_hessian[5][idx] = fzz;
+        fields.trace[idx] = trace;
+    }
+}
+
+inline void launch_rhs_source_lapse_equatorial_compact(
+    cudaStream_t stream,
+    int ex0, int ex1, int ex2,
+    const double* X, const double* Y, const double* Z,
+    const double* lapse,
+    const CompactLapseHessianFields& fields
+) {
+    const dim3 block(
+        COMPACT_HESSIAN_BX,
+        COMPACT_HESSIAN_BY,
+        COMPACT_HESSIAN_BZ
+    );
+    const dim3 grid(
+        (ex0 + block.x - 1) / block.x,
+        (ex1 + block.y - 1) / block.y,
+        (ex2 + block.z - 1) / block.z
+    );
+    rhs_source_lapse_equatorial_compact_kernel<<<grid, block, 0, stream>>>(
+        ex0, ex1, ex2, X, Y, Z, lapse, fields
     );
 }
 

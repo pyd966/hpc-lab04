@@ -1071,8 +1071,14 @@ __global__ void rhs_source_chi_ricci_kernel(RHS_KERNEL_PARAMS) {
     const double gupxx = betax_rhs[idx], gupxy = betay_rhs[idx], gupxz = betaz_rhs[idx];
     const double gupyy = dtSfx_rhs[idx], gupyz = dtSfy_rhs[idx], gupzz = dtSfz_rhs[idx];
     double chix, chiy, chiz;
-    d_fderivs_point(dims, chi, &chix, &chiy, &chiz,
-                    X, Y, Z, SYM, SYM, SYM, symmetry, lev, i, j, k);
+    if (symmetry == 1) {
+        chix = chi_rhs[idx];
+        chiy = trK_rhs[idx];
+        chiz = Lap_rhs[idx];
+    } else {
+        d_fderivs_point(dims, chi, &chix, &chiy, &chiz,
+                        X, Y, Z, SYM, SYM, SYM, symmetry, lev, i, j, k);
+    }
     const double fxx = ham_Res[idx], fxy = movx_Res[idx], fxz = movy_Res[idx];
     const double fyy = movz_Res[idx], fyz = Gmx_Res[idx], fzz = Gmy_Res[idx];
     const double f_scalar = gupxx * (fxx - F3o2/chin1 * chix * chix) +
@@ -1102,8 +1108,14 @@ __global__ void rhs_source_physical_gamma_kernel(RHS_KERNEL_PARAMS) {
     const double gupxx = betax_rhs[idx], gupxy = betay_rhs[idx], gupxz = betaz_rhs[idx];
     const double gupyy = dtSfx_rhs[idx], gupyz = dtSfy_rhs[idx], gupzz = dtSfz_rhs[idx];
     double chix, chiy, chiz;
-    d_fderivs_point(dims, chi, &chix, &chiy, &chiz,
-                    X, Y, Z, SYM, SYM, SYM, symmetry, lev, i, j, k);
+    if (symmetry == 1) {
+        chix = chi_rhs[idx];
+        chiy = trK_rhs[idx];
+        chiz = Lap_rhs[idx];
+    } else {
+        d_fderivs_point(dims, chi, &chix, &chiy, &chiz,
+                        X, Y, Z, SYM, SYM, SYM, symmetry, lev, i, j, k);
+    }
     const double gx_phy = (gupxx * chix + gupxy * chiy + gupxz * chiz)/chin1;
     const double gy_phy = (gupxy * chix + gupyy * chiy + gupyz * chiz)/chin1;
     const double gz_phy = (gupxz * chix + gupyz * chiy + gupzz * chiz)/chin1;
@@ -1682,12 +1694,72 @@ void gpu_compute_rhs_bssn_launch( // launch kernel with device pointers
     rhs_ricci_connection_offdiag_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
     // Source and advection mutate RHS arrays but are not consumed by constraints.
     if (!constraint_only) {
-        // Multi-stage source fission: metric, Chi, Gamma, lapse, trace, Aij, then gauge.
-        rhs_source_metric_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
-        rhs_source_chi_hessian_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
-        rhs_source_chi_ricci_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
-        rhs_source_physical_gamma_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
-        rhs_source_lapse_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
+        // Keep the geometry-stage Chi gradient alive until all Chi source
+        // consumers finish.  Other symmetry modes retain the legacy order.
+        if (symmetry == 1) {
+            const double* source_connections[3][COMPACT_TENSOR_COMPONENTS] = {
+                {d_Gamxxx, d_Gamxxy, d_Gamxxz, d_Gamxyy, d_Gamxyz, d_Gamxzz},
+                {d_Gamyxx, d_Gamyxy, d_Gamyxz, d_Gamyyy, d_Gamyyz, d_Gamyzz},
+                {d_Gamzxx, d_Gamzxy, d_Gamzxz, d_Gamzyy, d_Gamzyz, d_Gamzzz}
+            };
+            double* source_hessian[COMPACT_TENSOR_COMPONENTS] = {
+                d_ham_Res, d_movx_Res, d_movy_Res,
+                d_movz_Res, d_Gmx_Res, d_Gmy_Res
+            };
+
+            CompactChiHessianFields chi_fields{};
+            chi_fields.gradient[0] = d_chi_rhs;
+            chi_fields.gradient[1] = d_trK_rhs;
+            chi_fields.gradient[2] = d_Lap_rhs;
+            for (int upper = 0; upper < 3; ++upper) {
+                for (int component = 0;
+                     component < COMPACT_TENSOR_COMPONENTS; ++component) {
+                    chi_fields.connection[upper][component] =
+                        source_connections[upper][component];
+                }
+            }
+            for (int component = 0;
+                 component < COMPACT_TENSOR_COMPONENTS; ++component) {
+                chi_fields.covariant_hessian[component] =
+                    source_hessian[component];
+            }
+            launch_rhs_source_chi_hessian_equatorial_compact(
+                stream, ex[0], ex[1], ex[2], d_X, d_Y, d_Z,
+                d_chi, chi_fields
+            );
+            rhs_source_chi_ricci_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
+            rhs_source_physical_gamma_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
+
+            CompactLapseHessianFields lapse_fields{};
+            const double* inverse_metric[COMPACT_TENSOR_COMPONENTS] = {
+                d_betax_rhs, d_betay_rhs, d_betaz_rhs,
+                d_dtSfx_rhs, d_dtSfy_rhs, d_dtSfz_rhs
+            };
+            for (int upper = 0; upper < 3; ++upper) {
+                for (int component = 0;
+                     component < COMPACT_TENSOR_COMPONENTS; ++component) {
+                    lapse_fields.connection[upper][component] =
+                        source_connections[upper][component];
+                }
+            }
+            for (int component = 0;
+                 component < COMPACT_TENSOR_COMPONENTS; ++component) {
+                lapse_fields.inverse_metric[component] = inverse_metric[component];
+                lapse_fields.covariant_hessian[component] = source_hessian[component];
+            }
+            lapse_fields.trace = d_Gmz_Res;
+            launch_rhs_source_lapse_equatorial_compact(
+                stream, ex[0], ex[1], ex[2], d_X, d_Y, d_Z,
+                d_Lap, lapse_fields
+            );
+            rhs_source_metric_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
+        } else {
+            rhs_source_metric_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
+            rhs_source_chi_hessian_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
+            rhs_source_chi_ricci_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
+            rhs_source_physical_gamma_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
+            rhs_source_lapse_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
+        }
         // Gauge runs last because the Aij kernels still consume inverse metric values in the gauge RHS slots.
         rhs_source_trace_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
         rhs_source_a_diag_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
