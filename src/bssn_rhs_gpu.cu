@@ -2082,7 +2082,9 @@ void gpu_compute_rhs_bssn_launch( // launch kernel with device pointers
             rhs_source_a_diag_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
             rhs_source_a_offdiag_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
         }
-        rhs_source_gauge_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
+        if (symmetry != 1) {
+            rhs_source_gauge_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
+        }
 
         // Kernel 2: use the equatorial tiled path only for the course's
         // equatorial-symmetry mode; retain the legacy path for other modes.
@@ -2129,7 +2131,7 @@ void gpu_compute_rhs_bssn_launch( // launch kernel with device pointers
             launch_rhs_advection_equatorial_compact(
                 stream, ex[0], ex[1], ex[2],
                 d_X, d_Y, d_Z, d_betax, d_betay, d_betaz,
-                compact_fields, eps
+                compact_fields, eps, FF, eta
             );
         } else {
             rhs_advection_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);

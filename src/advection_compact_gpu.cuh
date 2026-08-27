@@ -199,7 +199,8 @@ __global__ void rhs_advection_equatorial_compact_kernel(
     int ex0, int ex1, int ex2,
     const double* X, const double* Y, const double* Z,
     const double* betax, const double* betay, const double* betaz,
-    CompactAdvectionFields fields, double eps
+    CompactAdvectionFields fields, double eps,
+    double gauge_ff, double gauge_eta
 ) {
     const int base_i = blockIdx.x * COMPACT_ADVECTION_BX;
     const int base_j = blockIdx.y * COMPACT_ADVECTION_BY;
@@ -227,6 +228,8 @@ __global__ void rhs_advection_equatorial_compact_kernel(
     const int idx = valid ? i + ex0 * (j + ex1 * k) : 0;
 
     __shared__ double tile[COMPACT_ADVECTION_TILE_SIZE];
+    __shared__ double gamma_source[3][
+        COMPACT_ADVECTION_BX * COMPACT_ADVECTION_BY * COMPACT_ADVECTION_BZ];
     __shared__ double scales[6];
     __shared__ int kmin_shared;
     if (tid == 0) {
@@ -247,6 +250,24 @@ __global__ void rhs_advection_equatorial_compact_kernel(
     const double vy = valid ? betay[idx] : 0.0;
     const double vz = valid ? betaz[idx] : 0.0;
     const int kmin = kmin_shared;
+
+    if (active) {
+        gamma_source[0][tid] = fields.rhs[14][idx];
+        gamma_source[1][tid] = fields.rhs[15][idx];
+        gamma_source[2][tid] = fields.rhs[16][idx];
+    } else if (valid) {
+        fields.rhs[17][idx] =
+            -2.0 * (fields.input[17][idx] + 1.0) * fields.input[13][idx];
+        fields.rhs[18][idx] = gauge_ff * fields.input[21][idx];
+        fields.rhs[19][idx] = gauge_ff * fields.input[22][idx];
+        fields.rhs[20][idx] = gauge_ff * fields.input[23][idx];
+        fields.rhs[21][idx] =
+            fields.rhs[14][idx] - gauge_eta * fields.input[21][idx];
+        fields.rhs[22][idx] =
+            fields.rhs[15][idx] - gauge_eta * fields.input[22][idx];
+        fields.rhs[23][idx] =
+            fields.rhs[16][idx] - gauge_eta * fields.input[23][idx];
+    }
 
     const int center_index = compact_tile_index(
         tx + COMPACT_ADVECTION_RADIUS,
@@ -289,7 +310,21 @@ __global__ void rhs_advection_equatorial_compact_kernel(
                     0, 0, kmin, ex0 - 1, ex1 - 1, ex2 - 1,
                     vx, vy, vz, scales[0], scales[1], scales[2]
                 );
-            double value = fields.rhs[field_index][idx] + advection;
+            const double center = compact_tile_at(
+                tile, center_index, 0, 0, 0
+            );
+            double base;
+            if (field_index == 17) {
+                base = -2.0 * (center + 1.0) * fields.input[13][idx];
+            } else if (field_index >= 18 && field_index <= 20) {
+                base = gauge_ff * fields.input[field_index + 3][idx];
+            } else if (field_index >= 21) {
+                base = gamma_source[field_index - 21][tid] -
+                    gauge_eta * center;
+            } else {
+                base = fields.rhs[field_index][idx];
+            }
+            double value = base + advection;
             if (eps > 0.0 &&
                 i >= 3 && i + 3 <= ex0 - 1 &&
                 j >= 3 && j + 3 <= ex1 - 1 &&
@@ -310,7 +345,8 @@ inline void launch_rhs_advection_equatorial_compact(
     int ex0, int ex1, int ex2,
     const double* X, const double* Y, const double* Z,
     const double* betax, const double* betay, const double* betaz,
-    const CompactAdvectionFields& fields, double eps
+    const CompactAdvectionFields& fields, double eps,
+    double gauge_ff, double gauge_eta
 ) {
     const dim3 block(
         COMPACT_ADVECTION_BX,
@@ -323,7 +359,8 @@ inline void launch_rhs_advection_equatorial_compact(
         (ex2 + block.z - 1) / block.z
     );
     rhs_advection_equatorial_compact_kernel<<<grid, block, 0, stream>>>(
-        ex0, ex1, ex2, X, Y, Z, betax, betay, betaz, fields, eps
+        ex0, ex1, ex2, X, Y, Z, betax, betay, betaz, fields, eps,
+        gauge_ff, gauge_eta
     );
 }
 
