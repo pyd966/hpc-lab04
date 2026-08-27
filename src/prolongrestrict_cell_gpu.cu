@@ -324,47 +324,95 @@ __device__ void d_prolong3_precomputed(
     bool k_even = ((kk / 2) * 2 == kk);
     bool j_even = ((jj / 2) * 2 == jj);
     bool i_even = ((ii / 2) * 2 == ii);
-    double tmp2[6][6];
-    double tmp1[6];
-    for (int m = 0; m < 6; ++m) {
-        for (int n = 0; n < 6; ++n) {
-            int cur_ic = cxI_i - 2 + n;
-            int cur_jc = cxI_j - 2 + m;
-            double val = 0.0;
-            if (k_even) {
-                val += C_PROLONG[0] * d_symmetry_bd_scalar(3, cnx, cny, cnz, func, cur_ic, cur_jc, cxI_k - 2, SoA);
-                val += C_PROLONG[1] * d_symmetry_bd_scalar(3, cnx, cny, cnz, func, cur_ic, cur_jc, cxI_k - 1, SoA);
-                val += C_PROLONG[2] * d_symmetry_bd_scalar(3, cnx, cny, cnz, func, cur_ic, cur_jc, cxI_k, SoA);
-                val += C_PROLONG[3] * d_symmetry_bd_scalar(3, cnx, cny, cnz, func, cur_ic, cur_jc, cxI_k + 1, SoA);
-                val += C_PROLONG[4] * d_symmetry_bd_scalar(3, cnx, cny, cnz, func, cur_ic, cur_jc, cxI_k + 2, SoA);
-                val += C_PROLONG[5] * d_symmetry_bd_scalar(3, cnx, cny, cnz, func, cur_ic, cur_jc, cxI_k + 3, SoA);
-            } else {
-                val += C_PROLONG[5] * d_symmetry_bd_scalar(3, cnx, cny, cnz, func, cur_ic, cur_jc, cxI_k - 2, SoA);
-                val += C_PROLONG[4] * d_symmetry_bd_scalar(3, cnx, cny, cnz, func, cur_ic, cur_jc, cxI_k - 1, SoA);
-                val += C_PROLONG[3] * d_symmetry_bd_scalar(3, cnx, cny, cnz, func, cur_ic, cur_jc, cxI_k, SoA);
-                val += C_PROLONG[2] * d_symmetry_bd_scalar(3, cnx, cny, cnz, func, cur_ic, cur_jc, cxI_k + 1, SoA);
-                val += C_PROLONG[1] * d_symmetry_bd_scalar(3, cnx, cny, cnz, func, cur_ic, cur_jc, cxI_k + 2, SoA);
-                val += C_PROLONG[0] * d_symmetry_bd_scalar(3, cnx, cny, cnz, func, cur_ic, cur_jc, cxI_k + 3, SoA);
-            }
-            tmp2[m][n] = val;
-        }
-    }
-    for (int n = 0; n < 6; ++n) {
-        double val = 0.0;
-        if (j_even) {
-            val += C_PROLONG[0] * tmp2[0][n] + C_PROLONG[1] * tmp2[1][n] + C_PROLONG[2] * tmp2[2][n] + C_PROLONG[3] * tmp2[3][n] + C_PROLONG[4] * tmp2[4][n] + C_PROLONG[5] * tmp2[5][n];
-        } else {
-            val += C_PROLONG[5] * tmp2[0][n] + C_PROLONG[4] * tmp2[1][n] + C_PROLONG[3] * tmp2[2][n] + C_PROLONG[2] * tmp2[3][n] + C_PROLONG[1] * tmp2[4][n] + C_PROLONG[0] * tmp2[5][n];
-        }
-        tmp1[n] = val;
-    }
     double final_val = 0.0;
-    if (i_even) {
-        final_val += C_PROLONG[0] * tmp1[0] + C_PROLONG[1] * tmp1[1] + C_PROLONG[2] * tmp1[2] + C_PROLONG[3] * tmp1[3] + C_PROLONG[4] * tmp1[4] + C_PROLONG[5] * tmp1[5];
-    } else {
-        final_val += C_PROLONG[5] * tmp1[0] + C_PROLONG[4] * tmp1[1] + C_PROLONG[3] * tmp1[2] + C_PROLONG[2] * tmp1[3] + C_PROLONG[1] * tmp1[4] + C_PROLONG[0] * tmp1[5];
+    #pragma unroll 1
+    for (int n = 0; n < 6; ++n) {
+        const int cur_ic = cxI_i - 2 + n;
+        double y_val = 0.0;
+        #pragma unroll 1
+        for (int m = 0; m < 6; ++m) {
+            const int cur_jc = cxI_j - 2 + m;
+            double z_val = 0.0;
+            if (k_even) {
+                z_val += C_PROLONG[0] * d_symmetry_bd_scalar(3, cnx, cny, cnz, func, cur_ic, cur_jc, cxI_k - 2, SoA);
+                z_val += C_PROLONG[1] * d_symmetry_bd_scalar(3, cnx, cny, cnz, func, cur_ic, cur_jc, cxI_k - 1, SoA);
+                z_val += C_PROLONG[2] * d_symmetry_bd_scalar(3, cnx, cny, cnz, func, cur_ic, cur_jc, cxI_k, SoA);
+                z_val += C_PROLONG[3] * d_symmetry_bd_scalar(3, cnx, cny, cnz, func, cur_ic, cur_jc, cxI_k + 1, SoA);
+                z_val += C_PROLONG[4] * d_symmetry_bd_scalar(3, cnx, cny, cnz, func, cur_ic, cur_jc, cxI_k + 2, SoA);
+                z_val += C_PROLONG[5] * d_symmetry_bd_scalar(3, cnx, cny, cnz, func, cur_ic, cur_jc, cxI_k + 3, SoA);
+            } else {
+                z_val += C_PROLONG[5] * d_symmetry_bd_scalar(3, cnx, cny, cnz, func, cur_ic, cur_jc, cxI_k - 2, SoA);
+                z_val += C_PROLONG[4] * d_symmetry_bd_scalar(3, cnx, cny, cnz, func, cur_ic, cur_jc, cxI_k - 1, SoA);
+                z_val += C_PROLONG[3] * d_symmetry_bd_scalar(3, cnx, cny, cnz, func, cur_ic, cur_jc, cxI_k, SoA);
+                z_val += C_PROLONG[2] * d_symmetry_bd_scalar(3, cnx, cny, cnz, func, cur_ic, cur_jc, cxI_k + 1, SoA);
+                z_val += C_PROLONG[1] * d_symmetry_bd_scalar(3, cnx, cny, cnz, func, cur_ic, cur_jc, cxI_k + 2, SoA);
+                z_val += C_PROLONG[0] * d_symmetry_bd_scalar(3, cnx, cny, cnz, func, cur_ic, cur_jc, cxI_k + 3, SoA);
+            }
+            y_val += C_PROLONG[j_even ? m : 5 - m] * z_val;
+        }
+        final_val += C_PROLONG[i_even ? n : 5 - n] * y_val;
     }
     funf[k * (fnx * fny) + j * fnx + i] = final_val;
+}
+
+__device__ __forceinline__ double d_restrict3_z_column(
+    int cur_if, int cur_jf, int kf_fine,
+    int fnx, int fny, int fnz, const double* funf, const double SoA[3]
+) {
+    double val = 0.0;
+    val += C_RESTRICT[0] * (
+        d_symmetry_bd_scalar(2, fnx, fny, fnz, funf, cur_if, cur_jf, kf_fine - 2, SoA) +
+        d_symmetry_bd_scalar(2, fnx, fny, fnz, funf, cur_if, cur_jf, kf_fine + 3, SoA));
+    val += C_RESTRICT[1] * (
+        d_symmetry_bd_scalar(2, fnx, fny, fnz, funf, cur_if, cur_jf, kf_fine - 1, SoA) +
+        d_symmetry_bd_scalar(2, fnx, fny, fnz, funf, cur_if, cur_jf, kf_fine + 2, SoA));
+    val += C_RESTRICT[2] * (
+        d_symmetry_bd_scalar(2, fnx, fny, fnz, funf, cur_if, cur_jf, kf_fine, SoA) +
+        d_symmetry_bd_scalar(2, fnx, fny, fnz, funf, cur_if, cur_jf, kf_fine + 1, SoA));
+    return val;
+}
+
+__device__ __forceinline__ double d_restrict3_y_column(
+    int cur_if, int jf_fine, int kf_fine,
+    int fnx, int fny, int fnz, const double* funf, const double SoA[3]
+) {
+    const double z0 = d_restrict3_z_column(cur_if, jf_fine - 2, kf_fine, fnx, fny, fnz, funf, SoA);
+    const double z1 = d_restrict3_z_column(cur_if, jf_fine - 1, kf_fine, fnx, fny, fnz, funf, SoA);
+    const double z2 = d_restrict3_z_column(cur_if, jf_fine, kf_fine, fnx, fny, fnz, funf, SoA);
+    const double z3 = d_restrict3_z_column(cur_if, jf_fine + 1, kf_fine, fnx, fny, fnz, funf, SoA);
+    const double z4 = d_restrict3_z_column(cur_if, jf_fine + 2, kf_fine, fnx, fny, fnz, funf, SoA);
+    const double z5 = d_restrict3_z_column(cur_if, jf_fine + 3, kf_fine, fnx, fny, fnz, funf, SoA);
+    double val = 0.0;
+    val += C_RESTRICT[0] * (z0 + z5);
+    val += C_RESTRICT[1] * (z1 + z4);
+    val += C_RESTRICT[2] * (z2 + z3);
+    return val;
+}
+
+__device__ __forceinline__ void d_restrict3_precomputed(
+    int i, int j, int k,
+    int lbc0, int lbc1, int lbc2, int lbf0, int lbf1, int lbf2,
+    int cnx, int cny, int cnz, double* func,
+    int fnx, int fny, int fnz, const double* funf, const double SoA[3]
+) {
+    const int i1b = i + 1;
+    const int j1b = j + 1;
+    const int k1b = k + 1;
+    const int if_fine = 2 * (i1b + lbc0 - 1) - 1 - lbf0 + 1;
+    const int jf_fine = 2 * (j1b + lbc1 - 1) - 1 - lbf1 + 1;
+    const int kf_fine = 2 * (k1b + lbc2 - 1) - 1 - lbf2 + 1;
+
+    const double x0 = d_restrict3_y_column(if_fine - 2, jf_fine, kf_fine, fnx, fny, fnz, funf, SoA);
+    const double x1 = d_restrict3_y_column(if_fine - 1, jf_fine, kf_fine, fnx, fny, fnz, funf, SoA);
+    const double x2 = d_restrict3_y_column(if_fine, jf_fine, kf_fine, fnx, fny, fnz, funf, SoA);
+    const double x3 = d_restrict3_y_column(if_fine + 1, jf_fine, kf_fine, fnx, fny, fnz, funf, SoA);
+    const double x4 = d_restrict3_y_column(if_fine + 2, jf_fine, kf_fine, fnx, fny, fnz, funf, SoA);
+    const double x5 = d_restrict3_y_column(if_fine + 3, jf_fine, kf_fine, fnx, fny, fnz, funf, SoA);
+    double final_val = 0.0;
+    final_val += C_RESTRICT[0] * (x0 + x5);
+    final_val += C_RESTRICT[1] * (x1 + x4);
+    final_val += C_RESTRICT[2] * (x2 + x3);
+    func[k * (cnx * cny) + j * cnx + i] = final_val;
 }
 
 // ++++++++++++++ Kernel Implementation ++++++++++++++
@@ -545,6 +593,8 @@ __global__ void restrict3_batch_kernel(
     double llbf0, double llbf1, double llbf2,
     double uubf0, double uubf1, double uubf2,
     int extf0, int extf1, int extf2,
+    int lbc0, int lbc1, int lbc2,
+    int lbf0, int lbf1, int lbf2,
     double llbt0, double llbt1, double llbt2,
     double uubt0, double uubt1, double uubt2,
     const Prolong3BatchVar* __restrict__ vars,
@@ -564,22 +614,11 @@ __global__ void restrict3_batch_kernel(
     int j = j_start + j_local;
     int k = k_start + k_local;
 
-    double arr_llbc[3] = {llbc0, llbc1, llbc2};
-    double arr_uubc[3] = {uubc0, uubc1, uubc2};
-    int    arr_extc[3] = {extc0, extc1, extc2};
-    double arr_llbf[3] = {llbf0, llbf1, llbf2};
-    double arr_uubf[3] = {uubf0, uubf1, uubf2};
-    int    arr_extf[3] = {extf0, extf1, extf2};
-    double arr_llbt[3] = {llbt0, llbt1, llbt2};
-    double arr_uubt[3] = {uubt0, uubt1, uubt2};
-
     Prolong3BatchVar v = vars[var];
-    d_restrict3_device(
-        i, j, k,
-        arr_llbc, arr_uubc, arr_extc, v.d_dst,
-        arr_llbf, arr_uubf, arr_extf, v.d_src,
-        arr_llbt, arr_uubt,
-        v.SoA, Symmetry
+    d_restrict3_precomputed(
+        i, j, k, lbc0, lbc1, lbc2, lbf0, lbf1, lbf2,
+        extc0, extc1, extc2, v.d_dst,
+        extf0, extf1, extf2, v.d_src, v.SoA
     );
 }
 
@@ -780,13 +819,14 @@ void gpu_restrict3_batch_launch(
         }
     }
 
-    int starts[3], ends[3];
+    int starts[3], ends[3], lbc[3], lbf[3];
     for (int d = 0; d < 3; ++d) {
         int lbr = (int)std::trunc((llbt[d] - base[d]) / CD[d] + 0.4) + 1;
         int ubr = (int)std::trunc((uubt[d] - base[d]) / CD[d] + 0.4);
-        int lbc = (int)std::trunc((llbc[d] - base[d]) / CD[d] + 0.4) + 1;
-        starts[d] = lbr - lbc;
-        ends[d] = ubr - lbc;
+        lbc[d] = (int)std::trunc((llbc[d] - base[d]) / CD[d] + 0.4) + 1;
+        lbf[d] = (int)std::trunc((llbf[d] - base[d]) / FD[d] + 0.4) + 1;
+        starts[d] = lbr - lbc[d];
+        ends[d] = ubr - lbc[d];
     }
     int ni = ends[0] - starts[0] + 1;
     int nj = ends[1] - starts[1] + 1;
@@ -802,6 +842,8 @@ void gpu_restrict3_batch_launch(
         extc[0], extc[1], extc[2],
         llbf[0], llbf[1], llbf[2], uubf[0], uubf[1], uubf[2],
         extf[0], extf[1], extf[2],
+        lbc[0], lbc[1], lbc[2],
+        lbf[0], lbf[1], lbf[2],
         llbt[0], llbt[1], llbt[2], uubt[0], uubt[1], uubt[2],
         d_vars, nvars, Symmetry
     );
