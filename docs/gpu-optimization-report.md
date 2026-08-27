@@ -2,50 +2,58 @@
 
 **日期：** 2026-08-27
 **目标：** 官方 `t=100` 运行时间 `<=370s`  
-**当前版本：** P2-A 持久化 transfer buffer + validity-aware 初始化实现
+**当前版本：** P2-C 赤道对称边界专用 compact tiled advection + P2-A 基础设施
 
 ## 1. 结论
 
-当前主线还没有接近 `370s`。阶段 4 基线的 `t=5` 三次结果为
-`89.150199 +/- 0.301396s`；P0-A 为 `84.722587s`，P0-B 为
-`83.529860 +/- 0.283895s`，P1-A 为 `82.166688 +/- 0.084628s`。按当前演化阶段近似线性外推，P1-A 的
-`t=100` 约为 `1206s`；目标要求演化部分从约 `11.97s/单位时间` 降到约 `3.4s/单位时间`，
-约需要 `3.5x` 的整体演化加速。
+P2-C 已经取得本项目迄今最大的单项收益。最终独立复验的 `t=5` program cost 为
+`74.633372 +/- 0.093387s`，相对 P1-A 的 `82.166688 +/- 0.084628s` 下降
+`9.17%`；`Total Evolve` 从 `53.366067 +/- 0.012849s` 降至
+`45.080233 +/- 0.043878s`，下降 `15.53%`。三次 checker 全部 PASS，trajectory RMS
+均为 `0`。更早的同配置三次复验为 `74.881219 +/- 1.340158s`，其中一次节点慢点
+同时拉高 program 和 evolve；该组也 3/3 PASS，本文不删除或隐藏这组波动数据。
 
-因此，继续优化 RK4 launch、单纯降低寄存器数或增加 stream 都不足以达到目标。
-主攻方向必须是：
+Nsys 显示 advection kernel family 的 `t=1` aggregate GPU 时间从 P1-A 的
+`2.4808s` 降到 `0.8289s`，下降 `66.59%`，即 `2.993x` kernel-family 加速。
+这明显超过“20% kernel 收益”，但不是整程序 `20%`：固定初值和后处理会稀释短窗
+program cost，剩余 evolution、beta-gamma 和 AMR kernel 也形成 Amdahl 上限。
 
-1. 避免约束输出重复执行完整 RHS；
-2. 消除 stencil helper 产生的 local-memory 流量和重复边界计算；
-3. 继续减少 RHS/AMR 的中间数据搬运；
-4. 只在确认有独立工作和安全 buffer 生命周期时减少同步。
+按 `P(T) = Program5 - Evolve5 + T/5 * Evolve5` 做仅供排优先级使用的线性模型，
+当前 `t=100` 约为 `931s`，仍需约 `2.52x` 整体模型加速，或让演化部分再加速约
+`2.65x`。因此 P2-C 证明了空间 tile 路线有效，但单独不足以达到 `370s`。下一步必须
+把 compact stencil 机制迁移到 `rhs_evolution_kernel`/beta-gamma 导数，并并行处理
+prolong/restrict 的 local array 和 AMR 持久化批调度。
 
 ## 2. Profile 方法与结果
 
 profile 在 HPC A100 MIG（`1g.10gb`，SM80）上执行，正确性检查通过。
 
-- Nsight Systems：job `171518`，`profile/gpu-nsys-20260826T155727Z-65`
-- Nsight Compute：job `171582`，`profile/gpu-ncu-20260826T160405Z-64`
-- P0-B Nsight Systems：job `174898`，`profile/gpu-nsys-20260827T022226Z-65`
-- P0-B benchmark：job `174882`，`profile/gpu-benchmark-20260827T021603Z-66`
-- profile 覆盖当前代码的 `t=0..1`；绝对时间以生产构建 benchmark 为准，Nsight 结果用于确定瓶颈结构。
+- 早期 Nsight Systems：job `171518`，`profile/gpu-nsys-20260826T155727Z-65`
+- 早期 Nsight Compute：job `171582`，`profile/gpu-ncu-20260826T160405Z-64`
+- P1-A Nsight Systems：`profile/p1a-nsys/gpu-nsys-20260827T035243Z-62`
+- P2-C 首版 full-tile Nsys：`profile/gpu-nsys-20260827T075056Z-66`（`t=0..4`）
+- P2-C 最终 hybrid NCU：job `177066`，`profile/gpu-ncu-20260827T083353Z-64`
+- P2-C 最终 benchmark：job `177015`、`177089`，artifact 分别为
+  `profile/gpu-benchmark-20260827T082733Z-64` 和
+  `profile/gpu-benchmark-20260827T083647Z-63`
+- 绝对时间以生产构建 benchmark 为准；Nsight 结果用于定位结构和比较同配置 kernel。
 
 ### 2.1 GPU kernel 热点
 
-当前 `t=1` 的演化阶段约 `12.21s`，主要 kernel 为：
+P2-C 首版 full-tile Nsys 覆盖 `t=0..4`。按 4 个演化时间单位归一化后，当前主要
+kernel family 为：
 
-| Kernel | 时间 | 占演化阶段 |
+| Kernel | GPU 时间/单位演化时间 | GPU kernel time share |
 |---|---:|---:|
-| `rhs_advection_kernel` | 3.33s | 26.0% |
-| `rhs_evolution_kernel` | 1.60s | 12.5% |
-| `rhs_geometry_kernel` | 0.90s | 7.0% |
-| `rhs_beta_gamma_prepare_kernel` | 0.86s | 6.7% |
-| `prolong3_batch_kernel` | 0.82s | 6.4% |
-| `rhs_constraints_kernel` | 0.55s | 4.3% |
-| `restrict3_batch_kernel` | 0.52s | 4.0% |
+| `rhs_evolution_kernel` | `1.646s` | `18.3%` |
+| `rhs_beta_gamma_prepare_kernel` | `0.847s` | `9.4%` |
+| `rhs_advection_equatorial_compact_kernel` | `0.829s` | `9.2%` |
+| `prolong3_batch_kernel` | `0.797s` | `8.9%` |
+| `restrict3_batch_kernel` | `0.546s` | `6.1%` |
 
-`rhs_advection_kernel` 是绝对第一热点，但其它 RHS kernel 合计仍占大部分时间，
-不能只优化 advection 后期待达到 3.5x。
+P2-C 前的 P1-A advection 为 `2.4808s/单位演化时间`，占 GPU kernel time
+`22.9%`；P2-C 后它已不再是第一热点。瓶颈已转移到 evolution、beta-gamma 和 AMR，
+继续只压 advection 的 Amdahl 上限很低。
 
 ### 2.2 CUDA API 与同步
 
@@ -59,17 +67,23 @@ host/device 工作仍有串行化。launch 数量本身已经不是首要瓶颈�
 
 ### 2.3 Advection 的 Nsight Compute 证据
 
-当前 kernel 使用 `(8,8,4)` block，首个采样 launch 的指标为：
+重构前的 legacy advection 使用 `(8,8,4)` block，早期采样显示 66
+registers/thread、实际 occupancy `32.5%`、`No Eligible=61.7%`，且 local-memory
+sector 约占全部 L1TEX sector 的 `85%`。这证明 local array、helper 和跨线程重复
+stencil load 是主因，而不是 compiler spill request 或单纯 occupancy 不足。
 
-- 66 registers/thread，理论 occupancy `37.5%`，实际 occupancy `32.5%`；
-- `No Eligible` warp `61.7%`，L1TEX scoreboard 等待约占 `51.8%`；
-- local memory sector 约占全部 L1TEX sector 的 `85%`；
-- local load utilization 约 `28.6%`；
-- 没有 compiler spill request；
-- L2 hit `96.1%`，DRAM throughput 约 `27.9%`。
+最终 compact kernel 的同类采样为：
 
-结论是 local array、helper 的局部数据访问、重复 stencil/边界计算造成了等待。
-这不是单纯的寄存器溢出或分支发散问题，继续追求更高理论 occupancy 不是第一优先级。
+- 单 launch `491.62us`，执行指令 `15.770M`；
+- 78 registers/thread，static shared memory `15.73KiB/block`；
+- 理论/实际 occupancy 为 `37.50%/35.28%`；
+- `No Eligible=57.06%`，L1TEX scoreboard stall 约占 `36.3%`；
+- L2 hit `79.40%`。
+
+与相同 grid/block/时钟的首版 compact NCU 相比，最终 hybrid 从 `502.94us` 降到
+`491.62us`（`-2.25%`），执行指令从 `16.441M` 降到 `15.770M`
+（`-4.08%`），寄存器和 shared memory 不变。occupancy 不是接受依据；同配置 kernel
+wall time、Nsys aggregate 时间和生产 benchmark 共同支持保留该版本。
 
 ## 3. 优先级优化方向
 
@@ -292,16 +306,16 @@ Nsys（持久 buffer / direct 对照：`gpu-nsys-20260827T042902Z-62`、
 结论：isolated 持久 buffer 实验曾出现约 `0.24%` 收益，但最终复验与 P1-A 在统计上
 持平，不能宣称端到端加速。保留它是因为它消除了反复分配并为后续持久化调度提供
 基础设施；validity-aware 初始化则是 ownership 语义修正。同步收窄和 direct-device
-实验均已用 checker 和重复 benchmark 排除。P2-A 不能贡献目标所需的 `3.5x` 加速，
-下一步应回到 P1-B（prolong/restrict local-memory）、RHS 空间复用/融合及更激进的
-constraint/analysis 调度。
+实验均已用 checker 和重复 benchmark 排除。P2-A 不能贡献当前模型仍需的 `2.52x`
+加速；P2-C 已验证 RHS 空间复用有效，下一步应迁移到 evolution/beta-gamma，并推进
+P1-B/P2-D 的 prolong/restrict local-memory 与持久化批调度。
 
 ## 4. 已有优化审计
 
 | 已有工作 | 判断 | 未完成部分 |
 |---|---|---|
-| RHS dataflow/fission | 有效 | P1-A 已完成 Gamma 导数/seed 融合并降 1.63%；尚无完整空间 tile reuse，旧 batch 方案不应直接恢复 |
-| Advection common factors | 有效但不彻底 | KO 仍重复坐标/边界计算；helper/local array 未处理 |
+| RHS dataflow/fission | 有效 | P1-A 已完成 Gamma 导数/seed 融合并降 1.63%；旧巨型 batch 方案不应直接恢复 |
+| Advection compact tile | 显著有效 | P2-C 将 advection family 降 `66.59%`，Evolve 降 `15.53%`；同样的空间复用尚未迁移到 evolution/beta-gamma |
 | Ricci derivative fission | 有效 | 继续做 contraction/load order，避免完整 Christoffel 物化 |
 | Stream sync reduction | 有效 | 仍有大量串行 stream wait；需要 buffer-level scheduling |
 | AMR cross-variable batching | 有效 | prolong/restrict 的局部数组和通用 helper 仍是瓶颈 |
@@ -312,32 +326,33 @@ constraint/analysis 调度。
 
 ## 5. 建议的实验与验收流程
 
-1. 固定当前版本，保存生产构建 `t=5` 三次基线和当前 Nsys/NCU 指标。
-2. P0 路径已验证；下一轮优先做 P1-B prolong/restrict local-memory 实验，再回到 helper scalar/inline/local-array。
-3. 每个候选先跑 `t=1` NCU，确认 local-memory、scoreboard 和 kernel wall time 的变化。
-4. 通过后用生产构建跑 `t=5` 三次，要求所有 checker、轨迹 RMS 和约束输出一致。
-5. 对同步、AMR 和 scratch 改动分别做端到端 A/B，不以 API 调用数作为唯一成功标准。
-6. 只有当分阶段结果外推到 `t=100 <=370s` 后，才提交完整官方 `t=100` 测试。
+1. 以最终 P2-C 的 `t=5` 两组三次结果、Nsys 和 NCU 作为新基线。
+2. 下一轮先做 `rhs_evolution_kernel` 的变量组 compact tile；每个候选用 NCU 验证
+   wall time、register/shared-memory、scoreboard 和指令数。
+3. 候选通过短跑后用生产构建跑 `t=5` 三次，要求 checker、trajectory RMS 和约束输出一致。
+4. 同时推进 P1-B/P2-D：消除 prolong/restrict local array，并复用 descriptor、
+   shell/weight 和 active-index buffer。
+5. 调度、graph、同步和 scratch 改动分别做端到端 A/B，不以 API 或 launch 数为唯一指标。
+6. 只有短窗分阶段模型进入 `t=100 <=370s` 区间后，才提交完整官方 `t=100` 测试。
 
-当前最值得立即尝试的是：**P1-B prolong/restrict local-memory 消除 + RHS helper local-memory 实验**。
-P0-A/P0-B/P1-A 已分别覆盖 local memory、约束重复计算和 Gamma producer launch；要继续接近
-`370s`，需要把 AMR batch 与 RHS stencil 的实际 memory 等待降下来，而不是继续增加 stream。
+当前最值得立即尝试的是：**把已经在 advection 上验证的 compact tile 迁移到
+`rhs_evolution_kernel` 的高占时导数组，同时并行处理 prolong/restrict local array**。
+继续增加 stream 或只融合小 producer 无法填补剩余约 `2.52x` 的模型时间差距。
 
 ## 6. 达标判断与激进路线
 
 ### 6.1 当前路线是否足够
 
-不能把“肯定做不到”理解为程序本身无解，但可以明确判断：**只沿着 P0-A、P0-B、P1-A
-这类局部 RHS 优化继续推进，达不到 `370s`**。当前 P1-A 的 `t=5` program cost 为
-`82.166688s`，按阶段 4 的近似外推，`t=100` 约为 `1206s`，仍需要约 `3.26x`
-端到端加速。P1-A 已经把目标 producer 的 GPU 时间减少约 `45.8%`，端到端却只下降
-`1.63%`，说明这条路线的单个 kernel 收益很快会被调度、同步和其他阶段吞掉。
+不能把“当前仍高于 `370s`”理解为程序无解，但 P2-C 的结果已经给出更严格的边界。
+最终 `t=5` program/evolve 为 `74.633372s/45.080233s`；扣除约 `29.55s` 的短窗
+固定部分再线性外推，`t=100` 约为 `931s`。该模型只用于排序，完整运行中的 regrid、
+移动 patch、分析和晚期物理阶段都可能改变单位成本，不能把 `931s` 当成正式成绩。
 
-当前 `t=1` Nsys 还给出了更重要的结构性证据：CUDA API trace 的 self-time 中，
-`cudaMemcpy`、`cudaDeviceSynchronize`、`cudaStreamSynchronize` 分别占约 `56.2%`、
-`25.2%`、`12.7%`；同时有 `43,386` 次 kernel launch、`215` 次 device synchronize、
-`472` 次 stream synchronize。这里的百分比是 API trace 时间占比，不等价于 GPU kernel
-占用率，但足以说明“再融合一个小 kernel”不是主要矛盾。
+即使如此，达到 `370s` 仍要求整体模型再加速约 `2.52x`，或将演化单位成本从
+约 `9.016s` 降至约 `3.404s`，即演化部分再加速约 `2.65x`。P2-C 已把原第一热点
+advection 的 aggregate GPU 时间削减 `66.59%`，而它现在只占 GPU kernel time
+`9.2%`；继续只优化该 kernel 不可能补齐差距。必须处理新的第一热点 evolution、
+beta-gamma，以及合计约 `15%` 的 prolong/restrict。
 
 ### 6.2 P2-A：实测结论与保留范围
 
@@ -353,9 +368,9 @@ API 时间主要是等待 kernel 的阻塞时间，真实 H2D/D2H 传输只有�
 AMR type2/3，direct 写完整目标字段还会改变内存访问和调度形态。
 
 结论是：P2-A 是低风险的基础设施整理和一次关键证伪，不是已证实的性能改进，更不是
-达到 `370s` 的主路径。后续只应把它作为 P2-B/P2-C 的基础，继续保持可增长 buffer、
-明确 ownership 和多 rank 原有 MPI 语义；不要再投入“所有 segment direct 化”这条
-已被实测排除的路线。
+达到 `370s` 的主路径。后续只应把它作为 P2-B/P2-D 的资源生命周期基础，继续保持
+可增长 buffer、明确 ownership 和多 rank 原有 MPI 语义；不要再投入“所有 segment
+direct 化”这条已被实测排除的路线。
 
 ### 6.3 P2-B：重写时间步调度，做跨变量 batching 和 CUDA Graph
 
@@ -377,20 +392,49 @@ boundary -> lower-bound 序列变成 replay。ghost exchange、MPI 和会改变�
 
 ### 6.4 P2-C：针对 dominant RHS 的空间 tile，而不是继续做小范围 fission
 
-P1-A 的 Nsys 中，`rhs_advection_kernel` 为 `2.48s/t=1`，`rhs_evolution_kernel` 为
-`1.69s/t=1`，二者远高于刚刚融合的 Gamma producer。`d_fderivs_point`、
-`d_fdderivs_point` 和 lopsided/KO helper 会对半径为 2 的邻域反复 global load；P0-A
-虽降低了 local-memory sector，但没有消除跨线程的邻域重复读取。
+P2-C 已实现并保留。新 kernel 位于
+[`advection_compact_gpu.cuh`](/home/h3250106394/lab04/src/advection_compact_gpu.cuh:1)，
+调度入口位于
+[`bssn_rhs_gpu.cu`](/home/h3250106394/lab04/src/bssn_rhs_gpu.cu:1616)。实现仅在
+`symmetry == 1` 时启用，其它 symmetry mode 继续使用 legacy kernel：
 
-建议先只为 advection + KO 做半径 2 的 shared-memory tile 或 x-line rolling cache，
-测量 register、shared-memory、occupancy 和 DRAM sector；成功后再把同样的 tile 机制移植
-到 evolution 中实际占时最高的一组导数。不要直接把完整 BSSN RHS 合成一个巨型 kernel：
-Christoffel/Ricci 中间值的生命周期会推高寄存器和 spill，已有实验也表明完整物化会被
-DRAM 流量抵消。
+- block 为 `(8,8,4)`；每个字段协作加载半径 3 的 `14x14x10` full tile，
+  static shared memory 为 `15.73KiB`；
+- 24 个演化字段顺序复用同一个 shared buffer，在 tile 内同时完成 lopsided advection
+  与 KO，保留对已有 RHS 的累加语义；
+- interior block 使用无边界检查快路径；边界 block 精确保留 legacy 的
+  `q < 0 -> -q - 1` 反射、x/y/z parity、赤道 `kmin=-3` 和降阶 stencil；
+- cooperative load 保持线性均衡和 coalescing，预计算 center index 后 stencil 访问变成
+  常量 shared-memory offset；launcher 自行按 compact block 计算 grid。
 
-这是高工作量但最可能提供 GPU 算力级收益的方向。必须先用 NCU 证明 excessive global
-load/local-memory load 下降，再用 `t=5` checker 验收；shared memory 版本如果只提高
-occupancy、却增加同步或降低实际 kernel wall time，应判定为失败。
+正式结果如下：
+
+| 版本 | `t=5` Program | `Total Evolve` | 正确性 |
+|---|---:|---:|---|
+| P1-A | `82.166688 +/- 0.084628s` | `53.366067 +/- 0.012849s` | 3/3 PASS |
+| 首版 full-tile 性能原型 | `74.495520 +/- 0.213883s` | `45.343833 +/- 0.062073s` | 3/3 PASS；随后补全三轴 parity |
+| 最终 hybrid，第一组 | `74.881219 +/- 1.340158s` | `45.523033 +/- 1.146557s` | 3/3 PASS；含一次整轮慢点 |
+| 最终 hybrid，独立复验 | `74.633372 +/- 0.093387s` | `45.080233 +/- 0.043878s` | 3/3 PASS |
+
+最终独立复验相对 P1-A 的 Program/Evolve 分别下降 `9.17%/15.53%`。两组最终
+corrected-run 共 6 次 checker 全部 PASS，trajectory RMS 均为 `0`；第一组慢点未从
+统计中剔除。Nsys 中 P1-A legacy advection 为 `2.480760s/392 launches/t=1`；
+首版 compact 在 4 个演化单位中为 `3.315689s/1568 launches`，归一化后
+`0.828922s/t=1`，即下降 `66.59%`、加速 `2.993x`。这与 Evolve 的实测收益符合
+Amdahl 预期，但不能写成整程序 `2.993x`。
+
+本轮没有在第一个有效版本上停止，还做了以下受控实验：
+
+| 候选 | 关键观测 | 决策 |
+|---|---|---|
+| 两字段 full-tile group | barrier 减半，但 `t=1` step 从约 `8.57--8.63s` 增至 `8.85s` | 回退 |
+| 四字段 cross tile | load 数减少，但 142 registers、`32.82KiB` shared、实际 occupancy `12.43%`，单 launch `870.53us` | 回退 |
+| nested strided loader | 62 registers、occupancy `43.62%`，但单 launch `518.78us` | 回退 |
+| linear loader + center-index hybrid | 78 registers、`15.73KiB` shared、occupancy `35.28%`，单 launch `491.62us` | 保留 |
+
+cross tile 的 CPU 穷举映射和所有短窗 checker 都通过；它失败是资源压力和 latency hiding，
+不是公式错误。这个反例也说明寄存器更少或 occupancy 更高都不是充分条件，接受标准必须是
+kernel wall time、aggregate profile、生产 benchmark 和 checker 的组合。
 
 ### 6.5 P2-D：AMR 交换从“每段/每变量”改成持久化批调度
 
@@ -406,26 +450,31 @@ restrict、同步和 prolong 依赖编排成少量 event。
 
 ### 6.6 可行性组合与不应采用的“捷径”
 
-P2-A 已经实测排除了此前对 device-only/persistent path 的 `1.3--1.8x` 乐观估算。
-其余 dominant stencil tile、batched schedule/graph 和 AMR 持久化 batch 仍只有工程
-假设，不能据此承诺组合后必然达到 `370s`。现在唯一严谨的判断是：目标仍然可能，
-但必须由 P2-C 首先提供显著的 RHS kernel 级收益，再由 P2-B/P2-D 减少调度与 AMR 工作；
-如果首个 tile 和跨变量 batch 原型都不能明显降低 `t=5`，就需要进一步重构按 level/block
-批处理的数据布局和跨 RHS 的导数复用，而不是继续做 producer 级微优化。
+P2-C 已经把“dominant stencil tile 是否有效”从工程假设变成肯定答案，但也同时暴露了
+Amdahl 上限：advection 降 `66.59%` 后，短窗 Program 只降 `9.17%`、Evolve 只降
+`15.53%`，剩余模型时间仍需约 `2.52x`。因此不能承诺把 P2-B/P2-D/P2-C 的乐观倍数
+直接相乘后必然达到 `370s`。
+
+可行组合必须是：先将已验证的 compact tile 迁移到 evolution 和 beta-gamma 的导数组，
+再消除 prolong/restrict local array 并做 AMR 持久化 batch，最后才评估 boundary batch
+和 CUDA Graph。若这三类 dominant workload 的 `t=5` 累计结果仍不能进入目标区间，
+就需要进一步重构按 level/block 的数据布局和跨 RHS 导数复用，而不是继续做小 producer
+融合。
 
 不建议把以下手段作为主路线：降低浮点精度、减少 RK 阶段或 AMR subcycling、跳过必要
-输出、修改网格/演化时间、让多个 MPI rank 争用同一 MIG。文档明确要求物理问题和数值
-结果等价；TwoPuncture 初值阶段即使全部消除，也不足以填补当前约 `3.26x` 的缺口。
+输出、修改网格/演化时间、让多个 MPI rank 争用同一 MIG。文档要求物理问题和数值结果
+等价；TwoPuncture 初值阶段即使全部消除，也不足以填补当前约 `2.52x` 的模型缺口。
 
 ### 6.7 推荐实施顺序
 
-1. 保留 P2-A 的单 rank persistent transfer buffer 和 validity-aware ownership 修正；
-   不再继续推进已经回退的“收窄同步/全量 direct-device”路径。
-2. 在此基础上做 per-block persistent scratch 和 descriptor，避免每个 pack/analysis
-   调用重新分配，并把同步点按真实数据依赖重新归类。
-3. 选择 `rhs_advection_kernel` 做第一个 shared tile 原型，分别跑 NCU、`t=1` checker
-   和 `t=5` 三次 A/B。
-4. 再做跨变量 RK4/boundary batch；若 host launch 仍是主要空洞，捕获每 level/stage
-   CUDA Graph。
-5. 最后把 AMR prolong/restrict/interpolation 纳入同一套持久化 batch 调度。只有短跑外推
-   已低于 `370s` 后，才提交完整 `t=100` 官方计时。
+1. 保留最终 P2-C linear-loader/center-index hybrid 和 P2-A ownership 修正；不再恢复
+   group/cross/strided loader 或全量 direct-device。
+2. 对 `rhs_evolution_kernel` 做变量组 compact tile，优先复用同一组半径 2/3 导数；
+   不把完整 BSSN RHS 合成一个寄存器生命周期不可控的巨型 kernel。
+3. 对 `rhs_beta_gamma_prepare_kernel` 做同样的导数 tile/dataflow 审计，评估能否与
+   evolution 的部分 producer 共享中间量而不物化完整 Christoffel。
+4. 并行推进 prolong/restrict 固定阶数标量化和 P2-D 持久 descriptor/buffer batch。
+5. dominant kernel 降下来后，再做跨变量 boundary batch；只有 Nsys 仍显示 host launch
+   空洞时才捕获 per-level/stage CUDA Graph。
+6. 每个阶段保持 NCU、Nsys、`t=5 x3` 和 checker 四层验收；短跑模型进入
+   `t=100 <=370s` 区间后，再提交完整官方 `t=100`。

@@ -5,6 +5,7 @@
 #include "kodiss.h"
 #include "lopsidediff.h"
 #include "gpu_manager.h"
+#include "advection_compact_gpu.cuh"
 
 #include <cuda_runtime.h>
 #include <math.h>
@@ -1610,8 +1611,56 @@ void gpu_compute_rhs_bssn_launch( // launch kernel with device pointers
         rhs_source_a_offdiag_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
         rhs_source_gauge_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
 
-        // Kernel 2: independent advection and KO dissipation.
-        rhs_advection_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
+        // Kernel 2: use the equatorial tiled path only for the course's
+        // equatorial-symmetry mode; retain the legacy path for other modes.
+        if (symmetry == 1) {
+            CompactAdvectionFields compact_fields{};
+            const double* compact_inputs[COMPACT_ADVECTION_FIELDS] = {
+                d_dxx, d_gxy, d_gxz, d_dyy, d_gyz, d_dzz,
+                d_Axx, d_Axy, d_Axz, d_Ayy, d_Ayz, d_Azz,
+                d_chi, d_trK, d_Gamx, d_Gamy, d_Gamz, d_Lap,
+                d_betax, d_betay, d_betaz, d_dtSfx, d_dtSfy, d_dtSfz
+            };
+            double* compact_rhs[COMPACT_ADVECTION_FIELDS] = {
+                d_gxx_rhs, d_gxy_rhs, d_gxz_rhs, d_gyy_rhs, d_gyz_rhs, d_gzz_rhs,
+                d_Axx_rhs, d_Axy_rhs, d_Axz_rhs, d_Ayy_rhs, d_Ayz_rhs, d_Azz_rhs,
+                d_chi_rhs, d_trK_rhs, d_Gamx_rhs, d_Gamy_rhs, d_Gamz_rhs, d_Lap_rhs,
+                d_betax_rhs, d_betay_rhs, d_betaz_rhs,
+                d_dtSfx_rhs, d_dtSfy_rhs, d_dtSfz_rhs
+            };
+            const int compact_x_parity[COMPACT_ADVECTION_FIELDS] = {
+                1, -1, -1, 1, 1, 1,
+                1, -1, -1, 1, 1, 1,
+                1, 1, -1, 1, 1, 1,
+                -1, 1, 1, -1, 1, 1
+            };
+            const int compact_y_parity[COMPACT_ADVECTION_FIELDS] = {
+                1, -1, 1, 1, -1, 1,
+                1, -1, 1, 1, -1, 1,
+                1, 1, 1, -1, 1, 1,
+                1, -1, 1, 1, -1, 1
+            };
+            const int compact_z_parity[COMPACT_ADVECTION_FIELDS] = {
+                1, 1, -1, 1, -1, 1,
+                1, 1, -1, 1, -1, 1,
+                1, 1, 1, 1, -1, 1,
+                1, 1, -1, 1, 1, -1
+            };
+            for (int field = 0; field < COMPACT_ADVECTION_FIELDS; ++field) {
+                compact_fields.input[field] = compact_inputs[field];
+                compact_fields.rhs[field] = compact_rhs[field];
+                compact_fields.parity_x[field] = compact_x_parity[field];
+                compact_fields.parity_y[field] = compact_y_parity[field];
+                compact_fields.parity_z[field] = compact_z_parity[field];
+            }
+            launch_rhs_advection_equatorial_compact(
+                stream, ex[0], ex[1], ex[2],
+                d_X, d_Y, d_Z, d_betax, d_betay, d_betaz,
+                compact_fields, eps
+            );
+        } else {
+            rhs_advection_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
+        }
     }
 
     // Kernel 3: constraints are only needed for the predictor stage.
