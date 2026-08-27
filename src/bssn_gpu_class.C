@@ -1431,13 +1431,13 @@ void bssn_class::Read_Ansorg()
 //================================================================================================
 
 void bssn_class::move_to_gpu() {
-    Helper::move_to_gpu_whole(GH, myrank, StateList);
-    Helper::move_to_gpu_whole(GH, myrank, RHSList);
-    Helper::move_to_gpu_whole(GH, myrank, MiscList);
-    Helper::move_to_gpu_whole(GH, myrank, SynchList_pre);
-    Helper::move_to_gpu_whole(GH, myrank, SynchList_cor);
-    Helper::move_to_gpu_whole(GH, myrank, ConstraintList);
-    Helper::move_to_gpu_whole(GH, myrank, DGList);       
+    Helper::ensure_on_gpu_whole(GH, myrank, StateList);
+    Helper::ensure_on_gpu_whole(GH, myrank, RHSList);
+    Helper::ensure_on_gpu_whole(GH, myrank, MiscList);
+    Helper::ensure_on_gpu_whole(GH, myrank, SynchList_pre);
+    Helper::ensure_on_gpu_whole(GH, myrank, SynchList_cor);
+    Helper::ensure_on_gpu_whole(GH, myrank, ConstraintList);
+    Helper::ensure_on_gpu_whole(GH, myrank, DGList);
 }
 
 void bssn_class::move_to_cpu() {

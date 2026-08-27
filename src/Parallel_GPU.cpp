@@ -294,6 +294,28 @@ void Parallel::gpu_transfer(
     MPI_Comm_size(MPI_COMM_WORLD, &cpusize);
     MPI_Comm_rank(MPI_COMM_WORLD, &myrank);
 
+    // A single-rank run has no MPI peer. Reuse one device-side packed buffer
+    // across all ghost/buffer exchanges instead of cudaMalloc/cudaFree per call.
+    if (cpusize == 1) {
+        const int length = gpu_data_packer(
+            nullptr, src[myrank], dst[myrank], myrank, PACK,
+            VarList1, VarList2, Symmetry
+        );
+        if (length > 0) {
+            double* transfer_buffer =
+                GPUManager::getInstance().acquire_transfer_buffer(length);
+            gpu_data_packer(
+                transfer_buffer, src[myrank], dst[myrank], myrank, PACK,
+                VarList1, VarList2, Symmetry
+            );
+            gpu_data_packer(
+                transfer_buffer, src[myrank], dst[myrank], myrank, UNPACK,
+                VarList1, VarList2, Symmetry
+            );
+        }
+        return;
+    }
+
     int node;
 
     MPI_Request *reqs;
@@ -350,6 +372,28 @@ void Parallel::gpu_transfer(
     int myrank, cpusize;
     MPI_Comm_size(MPI_COMM_WORLD, &cpusize);
     MPI_Comm_rank(MPI_COMM_WORLD, &myrank);
+
+    // A single-rank run has no MPI peer. Reuse one device-side packed buffer
+    // across all ghost/buffer exchanges instead of cudaMalloc/cudaFree per call.
+    if (cpusize == 1) {
+        const int length = gpu_data_packer(
+            nullptr, src[myrank], dst[myrank], myrank, PACK,
+            VarList1, VarList2, Symmetry
+        );
+        if (length > 0) {
+            double* transfer_buffer =
+                GPUManager::getInstance().acquire_transfer_buffer(length);
+            gpu_data_packer(
+                transfer_buffer, src[myrank], dst[myrank], myrank, PACK,
+                VarList1, VarList2, Symmetry
+            );
+            gpu_data_packer(
+                transfer_buffer, src[myrank], dst[myrank], myrank, UNPACK,
+                VarList1, VarList2, Symmetry
+            );
+        }
+        return;
+    }
 
     int node;
     MPI_Request *reqs = new MPI_Request[2 * cpusize];

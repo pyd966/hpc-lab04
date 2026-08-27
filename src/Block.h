@@ -50,6 +50,7 @@ public:
    void mark_gpu_modified(int var_index);
    void mark_cpu_modified(int var_index);
 
+   void ensure_on_gpu(MyList<var> *VarList);
    void move_to_gpu(MyList<var> *VarList);
    void move_to_cpu(MyList<var> *VarList);
 #endif

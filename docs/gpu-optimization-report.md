@@ -2,7 +2,7 @@
 
 **日期：** 2026-08-27
 **目标：** 官方 `t=100` 运行时间 `<=370s`  
-**当前版本：** P1-A 实验实现（本次提交）
+**当前版本：** P2-A 持久化 transfer buffer + validity-aware 初始化实现
 
 ## 1. 结论
 
@@ -234,6 +234,68 @@ buffer 都适合优先持久化。
 但当前 kernel launch 仅 `0.23s`，这不是主攻方向。除非数值 checker 允许，否则不要
 把 `fast-math` 当作默认优化。
 
+
+### P2-A：单进程 GPU transfer 的 device-side staging
+
+P2-A 针对 profile 中反复出现的 transfer staging 做了多轮 A/B，而不是只依据
+`cudaMemcpy` 的 API 时间推断收益。当前 benchmark 是单 MPI rank，因此没有真正的
+MPI peer；原路径仍会在每次 `gpu_transfer` 中重新 `cudaMalloc/cudaFree` 一个 packed
+buffer，再执行 pack、host/device staging 和 unpack。
+
+保留的实现位于 [`gpu_manager.cu`](/home/h3250106394/lab04/src/gpu_manager.cu:85)、
+[`gpu_manager.h`](/home/h3250106394/lab04/src/gpu_manager.h:34) 和
+[`Parallel_GPU.cpp`](/home/h3250106394/lab04/src/Parallel_GPU.cpp:294)：按进程维护可增长的
+单个 device transfer buffer，单 rank 的 pack/unpack 复用该 buffer；容量变更前由
+`gpu_data_packer` 的 stream synchronization 保证旧 buffer 不再被使用。多 rank 的
+MPI/CUDA-aware 分支保持原有行为。
+
+初始化阶段另外增加了 `ensure_on_gpu` 语义：只保证 GPU 副本存在，不把仍然有效的
+CPU 副本错误地标记为 stale。这修正了 `move_to_gpu()` 初始化上传的 ownership 语义，
+但对总时间的影响很小。
+
+#### 实测结果（2026-08-27）
+
+| 候选 | `t=5` program mean | 相对 P1-A | 结果 |
+|---|---:|---:|---|
+| P1-A | `82.166688 +/- 0.084628s` | - | 3/3 PASS |
+| 持久 transfer buffer | `81.966115 +/- 0.0144s` | `-0.24%` | 3/3 PASS |
+| buffer + validity-aware 初始化 | `82.130736 +/- 0.162994s` | `-0.04%` | 3/3 PASS |
+| 清理后最终复验 | `82.211364 +/- 0.678122s` | `+0.05%` | 3/3 PASS，与 P1-A 持平 |
+| 仅收窄同步到 touched streams | `82.833139 +/- 0.120439s` | `+0.81%` | 3/3 PASS，回退 |
+| same-level direct copy + AMR packed | `84.510283 +/- 1.580207s` | `+2.85%` | 3/3 PASS，回退 |
+| 完整 direct-device（含 AMR direct batch） | `85.414677 +/- 1.150887s` | `+3.95%` | 3/3 PASS，回退 |
+| AMR-only direct、type1 保持 packed | `82.201285 +/- 0.089987s` | `+0.04%` | 3/3 PASS，回退 |
+
+持久 buffer 的主要结果 artifact 为 `gpu-benchmark-20260827T042314Z-63`；初始化
+validity 版本为 `gpu-benchmark-20260827T052304Z-65`；同步对照为
+`gpu-benchmark-20260827T050249Z-65`；direct 实验分别为
+`gpu-benchmark-20260827T061906Z-65` 和 `gpu-benchmark-20260827T063144Z-66`。
+清理实验代码后，保留版本的短窗复验为 `gpu-benchmark-20260827T064353Z-65`，
+`t=1` checker PASS；最终三次复验为 `gpu-benchmark-20260827T065604Z-64`，三次
+program cost 为 `81.782679s`、`81.858237s`、`82.993176s`，checker 3/3 PASS。
+
+#### 为什么 direct 路径没有带来预期收益
+
+Nsys（持久 buffer / direct 对照：`gpu-nsys-20260827T042902Z-62`、
+`gpu-nsys-20260827T062505Z-64`、AMR-only `gpu-nsys-20260827T064029Z-65`）显示：
+
+- `cudaMemcpy` 的 host API self time 约 `6.3--6.5s`，但真正 GPU H2D/D2H 流量只有
+  约 `70--240ms`；大部分 API 时间是等待此前 kernel 完成，不能按字节传输时间估算
+  可节省的端到端时间。
+- direct-all 将 kernel launch 从约 `4.3万` 降到 `2.9万`，但 AMR batch kernel
+  仍占约 `0.82s`，同步边界仍有 `215` 次 `cudaDeviceSynchronize` 和约 `1.43s`
+  `cudaStreamSynchronize`。少掉的 unpack/pack kernel 只占几十毫秒，无法覆盖
+  direct 访问目标完整字段时的调度和内存访问代价。
+- 当前 workload 的 transfer 列表主要是 type2/3 AMR；自定义 same-level copy kernel
+  实际不是主路径。因此“把所有 segment 都 direct 化”是错误的放大方向。
+
+结论：isolated 持久 buffer 实验曾出现约 `0.24%` 收益，但最终复验与 P1-A 在统计上
+持平，不能宣称端到端加速。保留它是因为它消除了反复分配并为后续持久化调度提供
+基础设施；validity-aware 初始化则是 ownership 语义修正。同步收窄和 direct-device
+实验均已用 checker 和重复 benchmark 排除。P2-A 不能贡献目标所需的 `3.5x` 加速，
+下一步应回到 P1-B（prolong/restrict local-memory）、RHS 空间复用/融合及更激进的
+constraint/analysis 调度。
+
 ## 4. 已有优化审计
 
 | 已有工作 | 判断 | 未完成部分 |
@@ -260,3 +322,110 @@ buffer 都适合优先持久化。
 当前最值得立即尝试的是：**P1-B prolong/restrict local-memory 消除 + RHS helper local-memory 实验**。
 P0-A/P0-B/P1-A 已分别覆盖 local memory、约束重复计算和 Gamma producer launch；要继续接近
 `370s`，需要把 AMR batch 与 RHS stencil 的实际 memory 等待降下来，而不是继续增加 stream。
+
+## 6. 达标判断与激进路线
+
+### 6.1 当前路线是否足够
+
+不能把“肯定做不到”理解为程序本身无解，但可以明确判断：**只沿着 P0-A、P0-B、P1-A
+这类局部 RHS 优化继续推进，达不到 `370s`**。当前 P1-A 的 `t=5` program cost 为
+`82.166688s`，按阶段 4 的近似外推，`t=100` 约为 `1206s`，仍需要约 `3.26x`
+端到端加速。P1-A 已经把目标 producer 的 GPU 时间减少约 `45.8%`，端到端却只下降
+`1.63%`，说明这条路线的单个 kernel 收益很快会被调度、同步和其他阶段吞掉。
+
+当前 `t=1` Nsys 还给出了更重要的结构性证据：CUDA API trace 的 self-time 中，
+`cudaMemcpy`、`cudaDeviceSynchronize`、`cudaStreamSynchronize` 分别占约 `56.2%`、
+`25.2%`、`12.7%`；同时有 `43,386` 次 kernel launch、`215` 次 device synchronize、
+`472` 次 stream synchronize。这里的百分比是 API trace 时间占比，不等价于 GPU kernel
+占用率，但足以说明“再融合一个小 kernel”不是主要矛盾。
+
+### 6.2 P2-A：实测结论与保留范围
+
+P2-A 已完成并经过多轮 A/B。isolated 的单 rank 持久化 device transfer buffer 曾测得
+`81.966115s`（相对 P1-A 约 `-0.24%`），但清理后的最终三次复验为
+`82.211364 +/- 0.678122s`，相对 P1-A 的 `82.166688 +/- 0.084628s` 没有统计显著收益。
+初始化 `ensure_on_gpu` 仍然保留，因为它修正了 CPU/GPU ownership 语义。
+
+direct-device、收窄同步和 AMR-only direct 都已经做过重复 benchmark。它们要么回退
+（`82.83--85.41s`），要么与基线持平（`82.20s`）。Nsys 说明 `cudaMemcpy` 的 host
+API 时间主要是等待 kernel 的阻塞时间，真实 H2D/D2H 传输只有几十到几百毫秒；因此
+减少 staging API 或 launch 数并不会自动转化为端到端收益。当前 transfer 列表主要是
+AMR type2/3，direct 写完整目标字段还会改变内存访问和调度形态。
+
+结论是：P2-A 是低风险的基础设施整理和一次关键证伪，不是已证实的性能改进，更不是
+达到 `370s` 的主路径。后续只应把它作为 P2-B/P2-C 的基础，继续保持可增长 buffer、
+明确 ownership 和多 rank 原有 MPI 语义；不要再投入“所有 segment direct 化”这条
+已被实测排除的路线。
+
+### 6.3 P2-B：重写时间步调度，做跨变量 batching 和 CUDA Graph
+
+[`bssn_step_gpu.C`](/home/h3250106394/lab04/src/bssn_step_gpu.C:130) 在 predictor 和三个
+corrector 中都逐变量发射 RK4 和边界 kernel。可以把同一 block 的独立状态变量组织成
+持久化的 device pointer table，一次 batch launch 完成一组 RK4 更新；同理评估 level-0
+Sommerfeld 和 level>0 边界修正的跨变量 batch。这样优化的是 launch 参数准备和 host 调度，
+不是改变 RK4 数学步骤。
+
+在 batch 依赖稳定后，再按 level/stage 捕获 CUDA Graph，把固定的 enforce -> RHS -> RK4 ->
+boundary -> lower-bound 序列变成 replay。ghost exchange、MPI 和会改变拓扑的 AMR 操作
+留在 graph 外，或使用 graph update 节点更新指针/标量。Graph 不能解决错误的同步依赖，
+但有机会消化当前数万次 launch 的 CPU 开销。
+
+已有 RK4 batch 实验只有约 `0.22s/t=1` 收益，因此“只改 RK4 batch”不应作为达标方案；
+它需要和跨变量 boundary batch、基于真实依赖的 event/graph 一起评估。P2-A 已经说明
+不能先验假定 device-only 或窄同步会带来收益。主要风险是指针表更新成本、不同变量的
+边界属性，以及 graph capture 对动态 BH/AMR 状态的限制。
+
+### 6.4 P2-C：针对 dominant RHS 的空间 tile，而不是继续做小范围 fission
+
+P1-A 的 Nsys 中，`rhs_advection_kernel` 为 `2.48s/t=1`，`rhs_evolution_kernel` 为
+`1.69s/t=1`，二者远高于刚刚融合的 Gamma producer。`d_fderivs_point`、
+`d_fdderivs_point` 和 lopsided/KO helper 会对半径为 2 的邻域反复 global load；P0-A
+虽降低了 local-memory sector，但没有消除跨线程的邻域重复读取。
+
+建议先只为 advection + KO 做半径 2 的 shared-memory tile 或 x-line rolling cache，
+测量 register、shared-memory、occupancy 和 DRAM sector；成功后再把同样的 tile 机制移植
+到 evolution 中实际占时最高的一组导数。不要直接把完整 BSSN RHS 合成一个巨型 kernel：
+Christoffel/Ricci 中间值的生命周期会推高寄存器和 spill，已有实验也表明完整物化会被
+DRAM 流量抵消。
+
+这是高工作量但最可能提供 GPU 算力级收益的方向。必须先用 NCU 证明 excessive global
+load/local-memory load 下降，再用 `t=5` checker 验收；shared memory 版本如果只提高
+occupancy、却增加同步或降低实际 kernel wall time，应判定为失败。
+
+### 6.5 P2-D：AMR 交换从“每段/每变量”改成持久化批调度
+
+当前 Nsys 中 `prolong3_batch`、`restrict3_batch`、`global_interp` 分别约为
+`0.81s`、`0.51s`、`0.49s/t=1`，且 `PatList_Interp_Points_GPU` 仍逐变量发射
+`global_interp`，函数中还会分配、清零、同步和释放 shell/weight buffer。P1-B 应先解决
+batch kernel 的 local array；更激进的版本则是按 level 汇总所有 patch/variable 的
+descriptor，一次提交连续 batch，复用 shell/weight/active-index，并把同一 level 的
+restrict、同步和 prolong 依赖编排成少量 event。
+
+这个方向通常不单独提供 `3x`；P2-A 留下的持久 buffer/ownership 机制可以作为其资源
+生命周期基础，但不应再为组合收益额外计入未经证实的 device-only 加速。
+
+### 6.6 可行性组合与不应采用的“捷径”
+
+P2-A 已经实测排除了此前对 device-only/persistent path 的 `1.3--1.8x` 乐观估算。
+其余 dominant stencil tile、batched schedule/graph 和 AMR 持久化 batch 仍只有工程
+假设，不能据此承诺组合后必然达到 `370s`。现在唯一严谨的判断是：目标仍然可能，
+但必须由 P2-C 首先提供显著的 RHS kernel 级收益，再由 P2-B/P2-D 减少调度与 AMR 工作；
+如果首个 tile 和跨变量 batch 原型都不能明显降低 `t=5`，就需要进一步重构按 level/block
+批处理的数据布局和跨 RHS 的导数复用，而不是继续做 producer 级微优化。
+
+不建议把以下手段作为主路线：降低浮点精度、减少 RK 阶段或 AMR subcycling、跳过必要
+输出、修改网格/演化时间、让多个 MPI rank 争用同一 MIG。文档明确要求物理问题和数值
+结果等价；TwoPuncture 初值阶段即使全部消除，也不足以填补当前约 `3.26x` 的缺口。
+
+### 6.7 推荐实施顺序
+
+1. 保留 P2-A 的单 rank persistent transfer buffer 和 validity-aware ownership 修正；
+   不再继续推进已经回退的“收窄同步/全量 direct-device”路径。
+2. 在此基础上做 per-block persistent scratch 和 descriptor，避免每个 pack/analysis
+   调用重新分配，并把同步点按真实数据依赖重新归类。
+3. 选择 `rhs_advection_kernel` 做第一个 shared tile 原型，分别跑 NCU、`t=1` checker
+   和 `t=5` 三次 A/B。
+4. 再做跨变量 RK4/boundary batch；若 host launch 仍是主要空洞，捕获每 level/stage
+   CUDA Graph。
+5. 最后把 AMR prolong/restrict/interpolation 纳入同一套持久化 batch 调度。只有短跑外推
+   已低于 `370s` 后，才提交完整 `t=100` 官方计时。

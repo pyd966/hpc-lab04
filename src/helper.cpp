@@ -27,6 +27,26 @@ void move_to_gpu_whole(cgh *GH, int myrank, MyList<var> *VarList) {
     }
 }
 
+void ensure_on_gpu_whole(MyList<Patch> *Pp, int myrank, MyList<var> *VarList) {
+    while (Pp) {
+        MyList<Block> *BP = Pp->data->blb;
+        while (BP) {
+            Block *cg = BP->data;
+            if (myrank == cg->rank) {
+                cg->ensure_on_gpu(VarList);
+            }
+            BP = BP->next;
+        }
+        Pp = Pp->next;
+    }
+}
+
+void ensure_on_gpu_whole(cgh *GH, int myrank, MyList<var> *VarList) {
+    for (int lev = 0; lev < GH->levels; lev ++) {
+        Helper::ensure_on_gpu_whole(GH->PatL[lev], myrank, VarList);
+    }
+}
+
 void move_to_cpu_whole(MyList<Patch> *Pp, int myrank, MyList<var> *VarList) {
     while (Pp) {
         MyList<Block> *BP = Pp->data->blb;

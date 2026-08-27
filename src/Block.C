@@ -236,6 +236,15 @@ void Block::mark_cpu_modified(int var_index) {
 	gpu_valid[var_index] = false;
 }
 
+void Block::ensure_on_gpu(MyList<var> *VarList) {
+	MyList<var> *iter = VarList;
+	while (iter) {
+		int var_index = iter->data->sgfn;
+		require_on_gpu(var_index);
+		iter = iter->next;
+	}
+}
+
 void Block::move_to_gpu(MyList<var> *VarList) {
 	MyList<var> *iter = VarList;
 	while (iter) {

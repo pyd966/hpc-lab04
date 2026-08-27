@@ -22,6 +22,8 @@ struct GPUManager::Impl {
     std::atomic<unsigned int> stream_idx{0};
     Prolong3BatchVar* prolong_batch_vars = nullptr;
     size_t prolong_batch_capacity = 0;
+    double* transfer_buffer = nullptr;
+    size_t transfer_capacity = 0;
 };
 
 // 单例获取
@@ -81,6 +83,24 @@ void GPUManager::free_device_memory(double* d_ptr, size_t num_elements) {
     CUDA_CHECK(cudaFree(d_ptr));
 }
 
+double* GPUManager::acquire_transfer_buffer(size_t num_elements) {
+    if (num_elements == 0) return nullptr;
+    if (num_elements > pimpl->transfer_capacity) {
+        // gpu_data_packer synchronizes the streams that used the old buffer
+        // before the next transfer is started, so resizing is safe here.
+        if (pimpl->transfer_buffer) {
+            CUDA_CHECK(cudaFree(pimpl->transfer_buffer));
+            pimpl->transfer_buffer = nullptr;
+        }
+        CUDA_CHECK(cudaMalloc(
+            (void**)&pimpl->transfer_buffer,
+            num_elements * sizeof(double)
+        ));
+        pimpl->transfer_capacity = num_elements;
+    }
+    return pimpl->transfer_buffer;
+}
+
 void GPUManager::clear_pool() {
     // std::lock_guard<std::mutex> lock(pimpl->pool_mutex);
     // for (auto& pair : pimpl->memory_pool) {
@@ -89,6 +109,11 @@ void GPUManager::clear_pool() {
     //     }
     // }
     pimpl->memory_pool.clear();
+    if (pimpl->transfer_buffer) {
+        CUDA_CHECK(cudaFree(pimpl->transfer_buffer));
+        pimpl->transfer_buffer = nullptr;
+        pimpl->transfer_capacity = 0;
+    }
 }
 
 Prolong3BatchVar* GPUManager::acquire_prolong3_batch_vars(size_t count) {
