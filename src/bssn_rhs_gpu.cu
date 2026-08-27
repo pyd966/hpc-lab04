@@ -1499,13 +1499,17 @@ __global__ void rhs_source_a_offdiag_kernel(RHS_KERNEL_PARAMS) {
     Axz_rhs[idx] = chin1*src_xz + alpn1*(val_trK*l_Axz - TWO*term_xz) + l_Axx*betaxz + l_Axy*betayz + l_Ayz*betayx + l_Azz*betazx - l_Axz*betayy + F1o3*l_Axz*div_beta;
 }
 
-__global__ void rhs_source_metric_a_equatorial_kernel(RHS_KERNEL_PARAMS) {
+__global__ void rhs_source_trace_metric_a_equatorial_kernel(RHS_KERNEL_PARAMS) {
     (void)T; (void)eps; (void)co;
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     const int j = blockIdx.y * blockDim.y + threadIdx.y;
     const int k = blockIdx.z * blockDim.z + threadIdx.z;
     if (i >= ex0 || j >= ex1 || k >= ex2) return;
     const int idx = IDX3D(i, j, k, ex0, ex1, ex2);
+    const int tid = threadIdx.x + blockDim.x *
+        (threadIdx.y + blockDim.y * threadIdx.z);
+    __shared__ volatile double terms[6][
+        COMPACT_HESSIAN_BX * COMPACT_HESSIAN_BY * COMPACT_HESSIAN_BZ];
     const double alpn1 = Lap[idx] + ONE, chin1 = chi[idx] + ONE, val_trK = trK[idx];
     const double l_gxx = dxx[idx] + ONE, l_gxy = gxy[idx], l_gxz = gxz[idx];
     const double l_gyy = dyy[idx] + ONE, l_gyz = gyz[idx], l_gzz = dzz[idx] + ONE;
@@ -1521,13 +1525,29 @@ __global__ void rhs_source_metric_a_equatorial_kernel(RHS_KERNEL_PARAMS) {
     const double betazx = Axx_rhs[idx], betazy = Axy_rhs[idx], betazz = Axz_rhs[idx];
     const double div_beta = betaxx + betayy + betazz;
 
-    const double term_xx = gupxx*l_Axx*l_Axx + gupyy*l_Axy*l_Axy + gupzz*l_Axz*l_Axz + TWO*(gupxy*l_Axx*l_Axy + gupxz*l_Axx*l_Axz + gupyz*l_Axy*l_Axz);
-    const double term_yy = gupxx*l_Axy*l_Axy + gupyy*l_Ayy*l_Ayy + gupzz*l_Ayz*l_Ayz + TWO*(gupxy*l_Axy*l_Ayy + gupxz*l_Axy*l_Ayz + gupyz*l_Ayy*l_Ayz);
-    const double term_zz = gupxx*l_Axz*l_Axz + gupyy*l_Ayz*l_Ayz + gupzz*l_Azz*l_Azz + TWO*(gupxy*l_Axz*l_Ayz + gupxz*l_Axz*l_Azz + gupyz*l_Ayz*l_Azz);
-    const double term_xy = gupxx*l_Axx*l_Axy + gupyy*l_Axy*l_Ayy + gupzz*l_Axz*l_Ayz + gupxy*(l_Axx*l_Ayy + l_Axy*l_Axy) + gupxz*(l_Axx*l_Ayz + l_Axz*l_Axy) + gupyz*(l_Axy*l_Ayz + l_Axz*l_Ayy);
-    const double term_xz = gupxx*l_Axx*l_Axz + gupyy*l_Axy*l_Ayz + gupzz*l_Axz*l_Azz + gupxy*(l_Axx*l_Ayz + l_Axy*l_Axz) + gupxz*(l_Axx*l_Azz + l_Axz*l_Axz) + gupyz*(l_Axy*l_Azz + l_Axz*l_Ayz);
-    const double term_yz = gupxx*l_Axy*l_Axz + gupyy*l_Ayy*l_Ayz + gupzz*l_Ayz*l_Azz + gupxy*(l_Axy*l_Ayz + l_Ayy*l_Axz) + gupxz*(l_Axy*l_Azz + l_Ayz*l_Axz) + gupyz*(l_Ayy*l_Azz + l_Ayz*l_Ayz);
-    const double f_trace = Gmz_Res[idx];
+    terms[0][tid] = gupxx*l_Axx*l_Axx + gupyy*l_Axy*l_Axy + gupzz*l_Axz*l_Axz + TWO*(gupxy*l_Axx*l_Axy + gupxz*l_Axx*l_Axz + gupyz*l_Axy*l_Axz);
+    terms[1][tid] = gupxx*l_Axy*l_Axy + gupyy*l_Ayy*l_Ayy + gupzz*l_Ayz*l_Ayz + TWO*(gupxy*l_Axy*l_Ayy + gupxz*l_Axy*l_Ayz + gupyz*l_Ayy*l_Ayz);
+    terms[2][tid] = gupxx*l_Axz*l_Axz + gupyy*l_Ayz*l_Ayz + gupzz*l_Azz*l_Azz + TWO*(gupxy*l_Axz*l_Ayz + gupxz*l_Axz*l_Azz + gupyz*l_Ayz*l_Azz);
+    terms[3][tid] = gupxx*l_Axx*l_Axy + gupyy*l_Axy*l_Ayy + gupzz*l_Axz*l_Ayz + gupxy*(l_Axx*l_Ayy + l_Axy*l_Axy) + gupxz*(l_Axx*l_Ayz + l_Axz*l_Axy) + gupyz*(l_Axy*l_Ayz + l_Axz*l_Ayy);
+    terms[4][tid] = gupxx*l_Axx*l_Axz + gupyy*l_Axy*l_Ayz + gupzz*l_Axz*l_Azz + gupxy*(l_Axx*l_Ayz + l_Axy*l_Axz) + gupxz*(l_Axx*l_Azz + l_Axz*l_Axz) + gupyz*(l_Axy*l_Azz + l_Axz*l_Ayz);
+    terms[5][tid] = gupxx*l_Axy*l_Axz + gupyy*l_Ayy*l_Ayz + gupzz*l_Ayz*l_Azz + gupxy*(l_Axy*l_Ayz + l_Ayy*l_Axz) + gupxz*(l_Axy*l_Azz + l_Ayz*l_Axz) + gupyz*(l_Ayy*l_Azz + l_Ayz*l_Ayz);
+
+    const double trA2 =
+        gupxx * terms[0][tid] + gupyy * terms[1][tid] +
+        gupzz * terms[2][tid] + TWO * (
+            gupxy * terms[3][tid] + gupxz * terms[4][tid] +
+            gupyz * terms[5][tid]);
+    const double S = chin1 * (
+        gupxx*Sxx[idx] + gupyy*Syy[idx] + gupzz*Szz[idx] +
+        TWO*(gupxy*Sxy[idx] + gupxz*Sxz[idx] + gupyz*Syz[idx]));
+    const double trK_hessian = Gmz_Res[idx];
+    const double f = F2o3*val_trK*val_trK - trA2 -
+                     F16*PI*rho[idx] + EIGHT*PI*S;
+    const double f_trace =
+        -F1o3 * (trK_hessian + alpn1/chin1 * f);
+    Gmz_Res[idx] = f_trace;
+    trK_rhs[idx] = -chin1*trK_hessian + alpn1*(
+        F1o3*val_trK*val_trK + trA2 + FOUR*PI*(rho[idx] + S));
     const double src_xx = alpn1*(Rxx[idx] - EIGHT*PI*Sxx[idx]) - ham_Res[idx] - l_gxx*f_trace;
     const double src_yy = alpn1*(Ryy[idx] - EIGHT*PI*Syy[idx]) - movz_Res[idx] - l_gyy*f_trace;
     const double src_zz = alpn1*(Rzz[idx] - EIGHT*PI*Szz[idx]) - Gmy_Res[idx] - l_gzz*f_trace;
@@ -1548,12 +1568,12 @@ __global__ void rhs_source_metric_a_equatorial_kernel(RHS_KERNEL_PARAMS) {
                    l_gxy * betaxz + l_gyy * betayz + l_gxz * betaxy + l_gzz * betazy - l_gyz * betaxx;
     gxz_rhs[idx] = -TWO * alpn1 * l_Axz + F1o3 * l_gxz * div_beta +
                    l_gxx * betaxz + l_gxy * betayz + l_gyz * betayx + l_gzz * betazx - l_gxz * betayy;
-    Axx_rhs[idx] = chin1*src_xx + alpn1*(val_trK*l_Axx - TWO*term_xx) + TWO*(l_Axx*betaxx + l_Axy*betayx + l_Axz*betazx) - F2o3*l_Axx*div_beta;
-    Ayy_rhs[idx] = chin1*src_yy + alpn1*(val_trK*l_Ayy - TWO*term_yy) + TWO*(l_Axy*betaxy + l_Ayy*betayy + l_Ayz*betazy) - F2o3*l_Ayy*div_beta;
-    Azz_rhs[idx] = chin1*src_zz + alpn1*(val_trK*l_Azz - TWO*term_zz) + TWO*(l_Axz*betaxz + l_Ayz*betayz + l_Azz*betazz) - F2o3*l_Azz*div_beta;
-    Axy_rhs[idx] = chin1*src_xy + alpn1*(val_trK*l_Axy - TWO*term_xy) + l_Axx*betaxy + l_Axz*betazy + l_Ayy*betayx + l_Ayz*betazx - l_Axy*betazz + F1o3*l_Axy*div_beta;
-    Ayz_rhs[idx] = chin1*src_yz + alpn1*(val_trK*l_Ayz - TWO*term_yz) + l_Axy*betaxz + l_Ayy*betayz + l_Axz*betaxy + l_Azz*betazy - l_Ayz*betaxx + F1o3*l_Ayz*div_beta;
-    Axz_rhs[idx] = chin1*src_xz + alpn1*(val_trK*l_Axz - TWO*term_xz) + l_Axx*betaxz + l_Axy*betayz + l_Ayz*betayx + l_Azz*betazx - l_Axz*betayy + F1o3*l_Axz*div_beta;
+    Axx_rhs[idx] = chin1*src_xx + alpn1*(val_trK*l_Axx - TWO*terms[0][tid]) + TWO*(l_Axx*betaxx + l_Axy*betayx + l_Axz*betazx) - F2o3*l_Axx*div_beta;
+    Ayy_rhs[idx] = chin1*src_yy + alpn1*(val_trK*l_Ayy - TWO*terms[1][tid]) + TWO*(l_Axy*betaxy + l_Ayy*betayy + l_Ayz*betazy) - F2o3*l_Ayy*div_beta;
+    Azz_rhs[idx] = chin1*src_zz + alpn1*(val_trK*l_Azz - TWO*terms[2][tid]) + TWO*(l_Axz*betaxz + l_Ayz*betayz + l_Azz*betazz) - F2o3*l_Azz*div_beta;
+    Axy_rhs[idx] = chin1*src_xy + alpn1*(val_trK*l_Axy - TWO*terms[3][tid]) + l_Axx*betaxy + l_Axz*betazy + l_Ayy*betayx + l_Ayz*betazx - l_Axy*betazz + F1o3*l_Axy*div_beta;
+    Ayz_rhs[idx] = chin1*src_yz + alpn1*(val_trK*l_Ayz - TWO*terms[5][tid]) + l_Axy*betaxz + l_Ayy*betayz + l_Axz*betaxy + l_Azz*betazy - l_Ayz*betaxx + F1o3*l_Ayz*div_beta;
+    Axz_rhs[idx] = chin1*src_xz + alpn1*(val_trK*l_Axz - TWO*terms[4][tid]) + l_Axx*betaxz + l_Axy*betayz + l_Ayz*betayx + l_Azz*betazx - l_Axz*betayy + F1o3*l_Axz*div_beta;
 }
 
 __global__ void rhs_source_gauge_kernel(RHS_KERNEL_PARAMS) {
@@ -2075,10 +2095,10 @@ void gpu_compute_rhs_bssn_launch( // launch kernel with device pointers
             rhs_source_lapse_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
         }
         // Gauge runs last because the Aij kernels still consume inverse metric values in the gauge RHS slots.
-        rhs_source_trace_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
         if (symmetry == 1) {
-            rhs_source_metric_a_equatorial_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
+            rhs_source_trace_metric_a_equatorial_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
         } else {
+            rhs_source_trace_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
             rhs_source_a_diag_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
             rhs_source_a_offdiag_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
         }
