@@ -812,4 +812,278 @@ inline void launch_rhs_source_lapse_equatorial_compact(
     );
 }
 
+struct CompactChiLapseSourceFields {
+    const double* gradient[3];
+    double* connection[3][COMPACT_TENSOR_COMPONENTS];
+    const double* metric[COMPACT_TENSOR_COMPONENTS];
+    const double* inverse_metric[COMPACT_TENSOR_COMPONENTS];
+    double* ricci[COMPACT_TENSOR_COMPONENTS];
+    double* covariant_hessian[COMPACT_TENSOR_COMPONENTS];
+    double* trace;
+};
+
+// Chi consumes conformal connections; lapse consumes their physical updates.
+__global__ void rhs_source_chi_lapse_equatorial_compact_kernel(
+    int ex0, int ex1, int ex2,
+    const double* X, const double* Y, const double* Z,
+    const double* chi, const double* lapse,
+    CompactChiLapseSourceFields fields
+) {
+    const int base_i = blockIdx.x * COMPACT_HESSIAN_BX;
+    const int base_j = blockIdx.y * COMPACT_HESSIAN_BY;
+    const int base_k = blockIdx.z * COMPACT_HESSIAN_BZ;
+    const bool block_interior =
+        base_i >= COMPACT_HESSIAN_RADIUS &&
+        base_j >= COMPACT_HESSIAN_RADIUS &&
+        base_k >= COMPACT_HESSIAN_RADIUS &&
+        base_i + COMPACT_HESSIAN_BX + COMPACT_HESSIAN_RADIUS <= ex0 &&
+        base_j + COMPACT_HESSIAN_BY + COMPACT_HESSIAN_RADIUS <= ex1 &&
+        base_k + COMPACT_HESSIAN_BZ + COMPACT_HESSIAN_RADIUS <= ex2;
+
+    const int tx = threadIdx.x;
+    const int ty = threadIdx.y;
+    const int tz = threadIdx.z;
+    const int tid = tx + COMPACT_HESSIAN_BX *
+        (ty + COMPACT_HESSIAN_BY * tz);
+    const int threads = COMPACT_HESSIAN_BX *
+        COMPACT_HESSIAN_BY * COMPACT_HESSIAN_BZ;
+    const int i = base_i + tx;
+    const int j = base_j + ty;
+    const int k = base_k + tz;
+    const bool valid = i < ex0 && j < ex1 && k < ex2;
+    const bool active = valid && i < ex0 - 1 && j < ex1 - 1 && k < ex2 - 1;
+    const int idx = valid ? i + ex0 * (j + ex1 * k) : 0;
+
+    __shared__ double chi_tile[COMPACT_HESSIAN_TILE_SIZE];
+    __shared__ double lapse_tile[COMPACT_HESSIAN_TILE_SIZE];
+    __shared__ double scales[18];
+    __shared__ int kmin_shared;
+    if (tid == 0) {
+        const double dx = X[1] - X[0];
+        const double dy = Y[1] - Y[0];
+        const double dz = Z[1] - Z[0];
+        scales[0] = 1.0 / (dx * dx);
+        scales[1] = 1.0 / (dy * dy);
+        scales[2] = 1.0 / (dz * dz);
+        scales[3] = (1.0 / 12.0) / (dx * dx);
+        scales[4] = (1.0 / 12.0) / (dy * dy);
+        scales[5] = (1.0 / 12.0) / (dz * dz);
+        scales[6] = 0.25 / (dx * dy);
+        scales[7] = 0.25 / (dx * dz);
+        scales[8] = 0.25 / (dy * dz);
+        scales[9] = (1.0 / 144.0) / (dx * dy);
+        scales[10] = (1.0 / 144.0) / (dx * dz);
+        scales[11] = (1.0 / 144.0) / (dy * dz);
+        scales[12] = (1.0 / 12.0) / dx;
+        scales[13] = (1.0 / 12.0) / dy;
+        scales[14] = (1.0 / 12.0) / dz;
+        scales[15] = (1.0 / 2.0) / dx;
+        scales[16] = (1.0 / 2.0) / dy;
+        scales[17] = (1.0 / 2.0) / dz;
+        kmin_shared = (fabs(Z[0]) < dz) ? -2 : 0;
+    }
+
+    for (int p = tid; p < COMPACT_HESSIAN_LOGICAL_SIZE; p += threads) {
+        const int tile_i = p % COMPACT_HESSIAN_SX;
+        const int q = p / COMPACT_HESSIAN_SX;
+        const int tile_j = q % COMPACT_HESSIAN_SY;
+        const int tile_k = q / COMPACT_HESSIAN_SY;
+        const int gi = base_i + tile_i - COMPACT_HESSIAN_RADIUS;
+        const int gj = base_j + tile_j - COMPACT_HESSIAN_RADIUS;
+        const int gk = base_k + tile_k - COMPACT_HESSIAN_RADIUS;
+        const int tile_index = compact_hessian_tile_index(
+            tile_i, tile_j, tile_k
+        );
+        if (block_interior) {
+            const int global_index = gi + ex0 * (gj + ex1 * gk);
+            chi_tile[tile_index] = chi[global_index];
+            lapse_tile[tile_index] = lapse[global_index];
+        } else {
+            chi_tile[tile_index] = compact_hessian_symmetry_load(
+                chi, gi, gj, gk, ex0, ex1, ex2, 1, 1, 1
+            );
+            lapse_tile[tile_index] = compact_hessian_symmetry_load(
+                lapse, gi, gj, gk, ex0, ex1, ex2, 1, 1, 1
+            );
+        }
+    }
+    __syncthreads();
+
+    if (valid) {
+        const int center_index = compact_hessian_tile_index(
+            tx + COMPACT_HESSIAN_RADIUS,
+            ty + COMPACT_HESSIAN_RADIUS,
+            tz + COMPACT_HESSIAN_RADIUS
+        );
+
+        const double chix = fields.gradient[0][idx];
+        const double chiy = fields.gradient[1][idx];
+        const double chiz = fields.gradient[2][idx];
+
+        double l_Gamxxx = fields.connection[0][0][idx];
+        double l_Gamxxy = fields.connection[0][1][idx];
+        double l_Gamxxz = fields.connection[0][2][idx];
+        double l_Gamxyy = fields.connection[0][3][idx];
+        double l_Gamxyz = fields.connection[0][4][idx];
+        double l_Gamxzz = fields.connection[0][5][idx];
+        double l_Gamyxx = fields.connection[1][0][idx];
+        double l_Gamyxy = fields.connection[1][1][idx];
+        double l_Gamyxz = fields.connection[1][2][idx];
+        double l_Gamyyy = fields.connection[1][3][idx];
+        double l_Gamyyz = fields.connection[1][4][idx];
+        double l_Gamyzz = fields.connection[1][5][idx];
+        double l_Gamzxx = fields.connection[2][0][idx];
+        double l_Gamzxy = fields.connection[2][1][idx];
+        double l_Gamzxz = fields.connection[2][2][idx];
+        double l_Gamzyy = fields.connection[2][3][idx];
+        double l_Gamzyz = fields.connection[2][4][idx];
+        double l_Gamzzz = fields.connection[2][5][idx];
+
+        double chi_fxx, chi_fxy, chi_fxz;
+        double chi_fyy, chi_fyz, chi_fzz;
+        compact_hessian_derivatives_from_tile(
+            chi_tile, center_index, active, i, j, k,
+            ex0, ex1, ex2, kmin_shared, scales,
+            chi_fxx, chi_fxy, chi_fxz,
+            chi_fyy, chi_fyz, chi_fzz
+        );
+        chi_fxx -= l_Gamxxx * chix + l_Gamyxx * chiy + l_Gamzxx * chiz;
+        chi_fxy -= l_Gamxxy * chix + l_Gamyxy * chiy + l_Gamzxy * chiz;
+        chi_fxz -= l_Gamxxz * chix + l_Gamyxz * chiy + l_Gamzxz * chiz;
+        chi_fyy -= l_Gamxyy * chix + l_Gamyyy * chiy + l_Gamzyy * chiz;
+        chi_fyz -= l_Gamxyz * chix + l_Gamyyz * chiy + l_Gamzyz * chiz;
+        chi_fzz -= l_Gamxzz * chix + l_Gamyzz * chiy + l_Gamzzz * chiz;
+
+        const double chin1 = chi[idx] + 1.0;
+        const double l_gxx = fields.metric[0][idx] + 1.0;
+        const double l_gxy = fields.metric[1][idx];
+        const double l_gxz = fields.metric[2][idx];
+        const double l_gyy = fields.metric[3][idx] + 1.0;
+        const double l_gyz = fields.metric[4][idx];
+        const double l_gzz = fields.metric[5][idx] + 1.0;
+        const double gupxx = fields.inverse_metric[0][idx];
+        const double gupxy = fields.inverse_metric[1][idx];
+        const double gupxz = fields.inverse_metric[2][idx];
+        const double gupyy = fields.inverse_metric[3][idx];
+        const double gupyz = fields.inverse_metric[4][idx];
+        const double gupzz = fields.inverse_metric[5][idx];
+        const double f_scalar =
+            gupxx * (chi_fxx - 1.5 / chin1 * chix * chix) +
+            gupyy * (chi_fyy - 1.5 / chin1 * chiy * chiy) +
+            gupzz * (chi_fzz - 1.5 / chin1 * chiz * chiz) +
+            2.0 * (gupxy * (chi_fxy - 1.5 / chin1 * chix * chiy) +
+                   gupxz * (chi_fxz - 1.5 / chin1 * chix * chiz) +
+                   gupyz * (chi_fyz - 1.5 / chin1 * chiy * chiz));
+        fields.ricci[0][idx] +=
+            (chi_fxx - chix * chix / chin1 / 2.0 + l_gxx * f_scalar) / chin1 / 2.0;
+        fields.ricci[3][idx] +=
+            (chi_fyy - chiy * chiy / chin1 / 2.0 + l_gyy * f_scalar) / chin1 / 2.0;
+        fields.ricci[5][idx] +=
+            (chi_fzz - chiz * chiz / chin1 / 2.0 + l_gzz * f_scalar) / chin1 / 2.0;
+        fields.ricci[1][idx] +=
+            (chi_fxy - chix * chiy / chin1 / 2.0 + l_gxy * f_scalar) / chin1 / 2.0;
+        fields.ricci[2][idx] +=
+            (chi_fxz - chix * chiz / chin1 / 2.0 + l_gxz * f_scalar) / chin1 / 2.0;
+        fields.ricci[4][idx] +=
+            (chi_fyz - chiy * chiz / chin1 / 2.0 + l_gyz * f_scalar) / chin1 / 2.0;
+
+        const double gx_phy =
+            (gupxx * chix + gupxy * chiy + gupxz * chiz) / chin1;
+        const double gy_phy =
+            (gupxy * chix + gupyy * chiy + gupyz * chiz) / chin1;
+        const double gz_phy =
+            (gupxz * chix + gupyz * chiy + gupzz * chiz) / chin1;
+        l_Gamxxx -= ((chix + chix) / chin1 - l_gxx * gx_phy) * 0.5;
+        l_Gamyxx -= (                         - l_gxx * gy_phy) * 0.5;
+        l_Gamzxx -= (                         - l_gxx * gz_phy) * 0.5;
+        l_Gamxyy -= (                         - l_gyy * gx_phy) * 0.5;
+        l_Gamyyy -= ((chiy + chiy) / chin1 - l_gyy * gy_phy) * 0.5;
+        l_Gamzyy -= (                         - l_gyy * gz_phy) * 0.5;
+        l_Gamxzz -= (                         - l_gzz * gx_phy) * 0.5;
+        l_Gamyzz -= (                         - l_gzz * gy_phy) * 0.5;
+        l_Gamzzz -= ((chiz + chiz) / chin1 - l_gzz * gz_phy) * 0.5;
+        l_Gamxxy -= (chiy / chin1 - l_gxy * gx_phy) * 0.5;
+        l_Gamyxy -= (chix / chin1 - l_gxy * gy_phy) * 0.5;
+        l_Gamzxy -= (              - l_gxy * gz_phy) * 0.5;
+        l_Gamxxz -= (chiz / chin1 - l_gxz * gx_phy) * 0.5;
+        l_Gamyxz -= (              - l_gxz * gy_phy) * 0.5;
+        l_Gamzxz -= (chix / chin1 - l_gxz * gz_phy) * 0.5;
+        l_Gamxyz -= (              - l_gyz * gx_phy) * 0.5;
+        l_Gamyyz -= (chiz / chin1 - l_gyz * gy_phy) * 0.5;
+        l_Gamzyz -= (chiy / chin1 - l_gyz * gz_phy) * 0.5;
+
+        fields.connection[0][0][idx] = l_Gamxxx;
+        fields.connection[1][0][idx] = l_Gamyxx;
+        fields.connection[2][0][idx] = l_Gamzxx;
+        fields.connection[0][3][idx] = l_Gamxyy;
+        fields.connection[1][3][idx] = l_Gamyyy;
+        fields.connection[2][3][idx] = l_Gamzyy;
+        fields.connection[0][5][idx] = l_Gamxzz;
+        fields.connection[1][5][idx] = l_Gamyzz;
+        fields.connection[2][5][idx] = l_Gamzzz;
+        fields.connection[0][1][idx] = l_Gamxxy;
+        fields.connection[1][1][idx] = l_Gamyxy;
+        fields.connection[2][1][idx] = l_Gamzxy;
+        fields.connection[0][2][idx] = l_Gamxxz;
+        fields.connection[1][2][idx] = l_Gamyxz;
+        fields.connection[2][2][idx] = l_Gamzxz;
+        fields.connection[0][4][idx] = l_Gamxyz;
+        fields.connection[1][4][idx] = l_Gamyyz;
+        fields.connection[2][4][idx] = l_Gamzyz;
+
+        double Lapx, Lapy, Lapz;
+        compact_first_derivatives_from_tile(
+            lapse_tile, center_index, active, i, j, k,
+            ex0, ex1, ex2, kmin_shared, scales,
+            Lapx, Lapy, Lapz
+        );
+        double lapse_fxx, lapse_fxy, lapse_fxz;
+        double lapse_fyy, lapse_fyz, lapse_fzz;
+        compact_hessian_derivatives_from_tile(
+            lapse_tile, center_index, active, i, j, k,
+            ex0, ex1, ex2, kmin_shared, scales,
+            lapse_fxx, lapse_fxy, lapse_fxz,
+            lapse_fyy, lapse_fyz, lapse_fzz
+        );
+        lapse_fxx -= l_Gamxxx * Lapx + l_Gamyxx * Lapy + l_Gamzxx * Lapz;
+        lapse_fyy -= l_Gamxyy * Lapx + l_Gamyyy * Lapy + l_Gamzyy * Lapz;
+        lapse_fzz -= l_Gamxzz * Lapx + l_Gamyzz * Lapy + l_Gamzzz * Lapz;
+        lapse_fxy -= l_Gamxxy * Lapx + l_Gamyxy * Lapy + l_Gamzxy * Lapz;
+        lapse_fxz -= l_Gamxxz * Lapx + l_Gamyxz * Lapy + l_Gamzxz * Lapz;
+        lapse_fyz -= l_Gamxyz * Lapx + l_Gamyyz * Lapy + l_Gamzyz * Lapz;
+        const double trace =
+            gupxx * lapse_fxx + gupyy * lapse_fyy + gupzz * lapse_fzz +
+            2.0 * (gupxy * lapse_fxy + gupxz * lapse_fxz + gupyz * lapse_fyz);
+        fields.covariant_hessian[0][idx] = lapse_fxx;
+        fields.covariant_hessian[1][idx] = lapse_fxy;
+        fields.covariant_hessian[2][idx] = lapse_fxz;
+        fields.covariant_hessian[3][idx] = lapse_fyy;
+        fields.covariant_hessian[4][idx] = lapse_fyz;
+        fields.covariant_hessian[5][idx] = lapse_fzz;
+        fields.trace[idx] = trace;
+    }
+}
+
+inline void launch_rhs_source_chi_lapse_equatorial_compact(
+    cudaStream_t stream,
+    int ex0, int ex1, int ex2,
+    const double* X, const double* Y, const double* Z,
+    const double* chi, const double* lapse,
+    const CompactChiLapseSourceFields& fields
+) {
+    const dim3 block(
+        COMPACT_HESSIAN_BX,
+        COMPACT_HESSIAN_BY,
+        COMPACT_HESSIAN_BZ
+    );
+    const dim3 grid(
+        (ex0 + block.x - 1) / block.x,
+        (ex1 + block.y - 1) / block.y,
+        (ex2 + block.z - 1) / block.z
+    );
+    rhs_source_chi_lapse_equatorial_compact_kernel<<<grid, block, 0, stream>>>(
+        ex0, ex1, ex2, X, Y, Z, chi, lapse, fields
+    );
+}
+
 #endif
