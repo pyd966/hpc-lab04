@@ -741,6 +741,100 @@ void Parallel::gpu_prepare_inter_time_level(
     GPUManager::getInstance().synchronize_all();
 }
 
+bool Parallel::PatList_Interp_Point3_Local_GPU(
+    MyList<Patch> *PatL, MyList<var> *VarList,
+    const double point[3], double output[3], int Symmetry
+) {
+    int myrank = 0;
+    int nprocs = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD, &myrank);
+    MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
+    if (nprocs != 1 || !PatL || !PatL->data) return false;
+
+    std::array<var*, 3> fields{};
+    MyList<var> *varl = VarList;
+    for (int i = 0; i < 3; ++i) {
+        if (!varl) return false;
+        fields[i] = varl->data;
+        varl = varl->next;
+    }
+    if (varl) return false;
+
+    Patch *selected_patch = nullptr;
+    Block *selected_block = nullptr;
+    MyList<Patch> *patch_node = PatL;
+    while (patch_node && !selected_block) {
+        Patch *patch = patch_node->data;
+        double dh[3] = {0.0, 0.0, 0.0};
+        bool patch_hit = true;
+        for (int axis = 0; axis < dim; ++axis) {
+            dh[axis] = patch->getdX(axis);
+            const double lower = patch->bbox[axis] + patch->lli[axis] * dh[axis];
+            const double upper = patch->bbox[dim + axis] - patch->uui[axis] * dh[axis];
+            if (point[axis] < lower || point[axis] > upper) {
+                patch_hit = false;
+                break;
+            }
+        }
+
+        if (patch_hit) {
+            MyList<Block> *block_node = patch->blb;
+            while (block_node) {
+                Block *block = block_node->data;
+                bool block_hit = true;
+                for (int axis = 0; axis < dim; ++axis) {
+                    const double lower = feq(
+                        block->bbox[axis], patch->bbox[axis], dh[axis] / 2
+                    ) ? block->bbox[axis] + patch->lli[axis] * dh[axis]
+                      : block->bbox[axis] + ghost_width * dh[axis];
+                    const double upper = feq(
+                        block->bbox[dim + axis], patch->bbox[dim + axis], dh[axis] / 2
+                    ) ? block->bbox[dim + axis] - patch->uui[axis] * dh[axis]
+                      : block->bbox[dim + axis] - ghost_width * dh[axis];
+                    if (point[axis] - lower < -dh[axis] / 2 ||
+                        point[axis] - upper > dh[axis] / 2) {
+                        block_hit = false;
+                        break;
+                    }
+                }
+                if (block_hit) {
+                    selected_patch = patch;
+                    selected_block = block;
+                    break;
+                }
+                block_node = block_node->next;
+            }
+        }
+        patch_node = patch_node->next;
+    }
+
+    if (!selected_patch || !selected_block || selected_block->rank != myrank) {
+        return false;
+    }
+
+    double *d_output = GPUManager::getInstance().acquire_point_interp_buffer(3);
+    gpu_global_interp_point3_launch(
+        selected_block->stream,
+        point[0], point[1], point[2],
+        selected_block->shape[0], selected_block->shape[1], selected_block->shape[2],
+        selected_block->d_X[0], selected_block->d_X[1], selected_block->d_X[2],
+        selected_block->d_fgfs[fields[0]->sgfn],
+        selected_block->d_fgfs[fields[1]->sgfn],
+        selected_block->d_fgfs[fields[2]->sgfn],
+        2 * ghost_width,
+        fields[0]->SoA[0], fields[0]->SoA[1], fields[0]->SoA[2],
+        fields[1]->SoA[0], fields[1]->SoA[1], fields[1]->SoA[2],
+        fields[2]->SoA[0], fields[2]->SoA[1], fields[2]->SoA[2],
+        Symmetry, d_output
+    );
+    CUDA_CHECK(cudaMemcpyAsync(
+        output, d_output, 3 * sizeof(double), cudaMemcpyDeviceToHost,
+        selected_block->stream
+    ));
+    CUDA_CHECK(cudaStreamSynchronize(selected_block->stream));
+    return true;
+}
+
 bool Parallel::PatList_Interp_Points_GPU(
     cudaStream_t stream,
     MyList<Patch> *PatL, MyList<var> *VarList,

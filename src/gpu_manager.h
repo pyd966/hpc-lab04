@@ -32,6 +32,7 @@ public:
     double* allocate_device_memory(size_t num_elements);
     void free_device_memory(double* d_ptr, size_t num_elements);
     double* acquire_transfer_buffer(size_t num_elements);
+    double* acquire_point_interp_buffer(size_t num_elements);
     void clear_pool();
 
     // Persistent metadata storage for AMR cross-variable batching. The

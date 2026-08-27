@@ -207,6 +207,10 @@ namespace Parallel
         double *d_Shellf,
         int Symmetry
     );
+    bool PatList_Interp_Point3_Local_GPU(
+        MyList<Patch> *PatL, MyList<var> *VarList,
+        const double point[3], double output[3], int Symmetry
+    );
 #endif
     void aligncheck(double *bbox0, double *bboxl, int lev, double *DH0, int *shape);
     bool point_locat_gsl(double *pox, MyList<Parallel::gridseg> *gsl);

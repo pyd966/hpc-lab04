@@ -24,6 +24,8 @@ struct GPUManager::Impl {
     size_t prolong_batch_capacity = 0;
     double* transfer_buffer = nullptr;
     size_t transfer_capacity = 0;
+    double* point_interp_buffer = nullptr;
+    size_t point_interp_capacity = 0;
 };
 
 // 单例获取
@@ -101,6 +103,21 @@ double* GPUManager::acquire_transfer_buffer(size_t num_elements) {
     return pimpl->transfer_buffer;
 }
 
+double* GPUManager::acquire_point_interp_buffer(size_t num_elements) {
+    if (num_elements == 0) return nullptr;
+    if (num_elements > pimpl->point_interp_capacity) {
+        if (pimpl->point_interp_buffer) {
+            CUDA_CHECK(cudaFree(pimpl->point_interp_buffer));
+        }
+        CUDA_CHECK(cudaMalloc(
+            (void**)&pimpl->point_interp_buffer,
+            num_elements * sizeof(double)
+        ));
+        pimpl->point_interp_capacity = num_elements;
+    }
+    return pimpl->point_interp_buffer;
+}
+
 void GPUManager::clear_pool() {
     // std::lock_guard<std::mutex> lock(pimpl->pool_mutex);
     // for (auto& pair : pimpl->memory_pool) {
@@ -113,6 +130,11 @@ void GPUManager::clear_pool() {
         CUDA_CHECK(cudaFree(pimpl->transfer_buffer));
         pimpl->transfer_buffer = nullptr;
         pimpl->transfer_capacity = 0;
+    }
+    if (pimpl->point_interp_buffer) {
+        CUDA_CHECK(cudaFree(pimpl->point_interp_buffer));
+        pimpl->point_interp_buffer = nullptr;
+        pimpl->point_interp_capacity = 0;
     }
 }
 

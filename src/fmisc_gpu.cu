@@ -473,6 +473,62 @@ void gpu_global_interp_launch(
 	);
 }
 
+__global__ void global_interp_point3_kernel(
+    double x, double y, double z,
+    int ex0, int ex1, int ex2,
+    const double* X, const double* Y, const double* Z,
+    const double* field0, const double* field1, const double* field2,
+    int ordn,
+    double soa00, double soa01, double soa02,
+    double soa10, double soa11, double soa12,
+    double soa20, double soa21, double soa22,
+    int symmetry, double* output
+) {
+    const int field_index = threadIdx.x;
+    if (field_index >= 3) return;
+
+    const double* field = field_index == 0 ? field0 :
+                          field_index == 1 ? field1 : field2;
+    double soa[3];
+    if (field_index == 0) {
+        soa[0] = soa00; soa[1] = soa01; soa[2] = soa02;
+    } else if (field_index == 1) {
+        soa[0] = soa10; soa[1] = soa11; soa[2] = soa12;
+    } else {
+        soa[0] = soa20; soa[1] = soa21; soa[2] = soa22;
+    }
+
+    const int ex[3] = {ex0, ex1, ex2};
+    global_interp_device(
+        ex, X, Y, Z, field, &output[field_index],
+        x, y, z, ordn, soa, symmetry
+    );
+}
+
+void gpu_global_interp_point3_launch(
+    cudaStream_t stream,
+    double x, double y, double z,
+    int shape_0, int shape_1, int shape_2,
+    const double* d_X_0, const double* d_X_1, const double* d_X_2,
+    const double* d_field_0, const double* d_field_1, const double* d_field_2,
+    int ordn,
+    double soa_00, double soa_01, double soa_02,
+    double soa_10, double soa_11, double soa_12,
+    double soa_20, double soa_21, double soa_22,
+    int symmetry, double* d_output
+) {
+    global_interp_point3_kernel<<<1, 3, 0, stream>>>(
+        x, y, z, shape_0, shape_1, shape_2,
+        d_X_0, d_X_1, d_X_2,
+        d_field_0, d_field_1, d_field_2,
+        ordn,
+        soa_00, soa_01, soa_02,
+        soa_10, soa_11, soa_12,
+        soa_20, soa_21, soa_22,
+        symmetry, d_output
+    );
+}
+
 __forceinline__ __device__ double warpReduceSum(double val) {
     for (int offset = warpSize / 2; offset > 0; offset /= 2) {
         val += __shfl_down_sync(0xffffffff, val, offset);

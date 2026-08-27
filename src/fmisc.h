@@ -319,6 +319,19 @@ void gpu_global_interp_launch(
     double* d_shellf, int* d_weight
 );
 
+void gpu_global_interp_point3_launch(
+    cudaStream_t stream,
+    double x, double y, double z,
+    int shape_0, int shape_1, int shape_2,
+    const double* d_X_0, const double* d_X_1, const double* d_X_2,
+    const double* d_field_0, const double* d_field_1, const double* d_field_2,
+    int ordn,
+    double soa_00, double soa_01, double soa_02,
+    double soa_10, double soa_11, double soa_12,
+    double soa_20, double soa_21, double soa_22,
+    int symmetry, double* d_output
+);
+
 void gpu_l2normhelper_launch(
 	cudaStream_t stream, 
 	const int* ex, 

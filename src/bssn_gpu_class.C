@@ -2703,28 +2703,51 @@ void bssn_class::compute_Porg_rhs(double **BH_PS, double **BH_RHS, var *forx, va
     DG_List->insert(fory);
     DG_List->insert(forz);
 
-    double *d_pox[3];
-    for (int i = 0; i < 3; i++) {
-        d_pox[i] = GPUManager::getInstance().allocate_device_memory(1);
-    }
-    double *d_shellf = GPUManager::getInstance().allocate_device_memory(InList);
+    double *d_pox[3] = {nullptr, nullptr, nullptr};
+    double *d_shellf = nullptr;
     double h_shellf[3] = {0.0, 0.0, 0.0};
 
     for (int n = 0; n < BH_num; n++) {
         double h_pox[3] = { BH_PS[n][0], BH_PS[n][1], BH_PS[n][2] };
-        
-        GPUManager::getInstance().sync_to_gpu(&h_pox[0], d_pox[0], 1);
-        GPUManager::getInstance().sync_to_gpu(&h_pox[1], d_pox[1], 1);
-        GPUManager::getInstance().sync_to_gpu(&h_pox[2], d_pox[2], 1);
 
         int lev = ilev;
+        bool found = false;
 
-        while (lev >= 0) {
-            bool found = Parallel::PatList_Interp_Points_GPU(GPUManager::getInstance().get_stream(), GH->PatL[lev], DG_List, 1, d_pox, d_shellf, Symmetry);
-            if (found) {
-                break;
+        if (nprocs == 1) {
+            while (lev >= 0) {
+                found = Parallel::PatList_Interp_Point3_Local_GPU(
+                    GH->PatL[lev], DG_List, h_pox, h_shellf, Symmetry
+                );
+                if (found) break;
+                lev--;
             }
-            lev--;
+        }
+
+        // Preserve the generic MPI/normalization path for non-official
+        // configurations and as a diagnostic fallback if local selection fails.
+        if (!found) {
+            if (!d_shellf) {
+                for (int i = 0; i < 3; i++) {
+                    d_pox[i] = GPUManager::getInstance().allocate_device_memory(1);
+                }
+                d_shellf = GPUManager::getInstance().allocate_device_memory(InList);
+            }
+            for (int i = 0; i < 3; ++i) {
+                GPUManager::getInstance().sync_to_gpu(&h_pox[i], d_pox[i], 1);
+            }
+
+            lev = ilev;
+            while (lev >= 0) {
+                found = Parallel::PatList_Interp_Points_GPU(
+                    GPUManager::getInstance().get_stream(), GH->PatL[lev],
+                    DG_List, 1, d_pox, d_shellf, Symmetry
+                );
+                if (found) break;
+                lev--;
+            }
+            if (found) {
+                GPUManager::getInstance().sync_to_cpu(h_shellf, d_shellf, InList);
+            }
         }
 
         if (lev < 0) {
@@ -2732,7 +2755,6 @@ void bssn_class::compute_Porg_rhs(double **BH_PS, double **BH_RHS, var *forx, va
             ErrorMonitor->outfile << "(x,y,z) = (" << h_pox[0] << "," << h_pox[1] << "," << h_pox[2] << ")" << endl;
         }
         else {
-            GPUManager::getInstance().sync_to_cpu(h_shellf, d_shellf, InList);
             BH_RHS[n][0] = -h_shellf[0];
             BH_RHS[n][1] = -h_shellf[1];
             BH_RHS[n][2] = -h_shellf[2];
@@ -2742,9 +2764,9 @@ void bssn_class::compute_Porg_rhs(double **BH_PS, double **BH_RHS, var *forx, va
     // 清理资源
     DG_List->clearList();
     for (int i = 0; i < 3; i++) {
-        GPUManager::getInstance().free_device_memory(d_pox[i], 1);
+        if (d_pox[i]) GPUManager::getInstance().free_device_memory(d_pox[i], 1);
     }
-    GPUManager::getInstance().free_device_memory(d_shellf, InList);
+    if (d_shellf) GPUManager::getInstance().free_device_memory(d_shellf, InList);
 }
 
 //================================================================================================
