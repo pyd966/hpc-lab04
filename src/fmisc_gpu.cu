@@ -249,27 +249,174 @@ __device__ __forceinline__ double d_interp_sample_1b_exact(
 	return f_at_1b(f, ex, 1 - i, 1 - j, 1 - k) * SoA[0] * SoA[1] * SoA[2];
 }
 
+__device__ __forceinline__ double d_select6_scalar(
+	int index,
+	double v0, double v1, double v2,
+	double v3, double v4, double v5
+) {
+	switch (index) {
+		case 0: return v0;
+		case 1: return v1;
+		case 2: return v2;
+		case 3: return v3;
+		case 4: return v4;
+		default: return v5;
+	}
+}
+
+__device__ __forceinline__ bool d_neville6_update(
+	double& ci, double& di, double cnext,
+	double hi, double him, double x
+) {
+	double den = hi - him;
+	if (den == 0.0) {
+#if GPU_DEBUG_PRINT
+		printf("failure in polint for point %f\n", x);
+		printf("with input points: 0.000000 1.000000 2.000000 3.000000 4.000000 5.000000\n");
+#else
+		(void)x;
+#endif
+		gpu_stop();
+		return false;
+	}
+	den = (cnext - di) / den;
+	di = him * den;
+	ci = hi * den;
+	return true;
+}
+
+// Keep this as a call boundary so the six-point Neville workspace does not
+// extend the live ranges of the surrounding three-dimensional interpolation.
+__device__ __noinline__ double d_polint6_scalar(
+	double v0, double v1, double v2,
+	double v3, double v4, double v5,
+	double x
+) {
+	int ns = 1;
+	double dif = fabs(x - 0.0);
+	double dift;
+
+	double c0 = v0, d0 = v0, h0 = 0.0 - x;
+	dift = fabs(x - 0.0);
+	if (dift < dif) { ns = 1; dif = dift; }
+	double c1 = v1, d1 = v1, h1 = 1.0 - x;
+	dift = fabs(x - 1.0);
+	if (dift < dif) { ns = 2; dif = dift; }
+	double c2 = v2, d2 = v2, h2 = 2.0 - x;
+	dift = fabs(x - 2.0);
+	if (dift < dif) { ns = 3; dif = dift; }
+	double c3 = v3, d3 = v3, h3 = 3.0 - x;
+	dift = fabs(x - 3.0);
+	if (dift < dif) { ns = 4; dif = dift; }
+	double c4 = v4, d4 = v4, h4 = 4.0 - x;
+	dift = fabs(x - 4.0);
+	if (dift < dif) { ns = 5; dif = dift; }
+	double c5 = v5, d5 = v5, h5 = 5.0 - x;
+	dift = fabs(x - 5.0);
+	if (dift < dif) { ns = 6; dif = dift; }
+
+	double y = d_select6_scalar(ns - 1, v0, v1, v2, v3, v4, v5);
+	ns = ns - 1;
+	double dy;
+
+	if (!d_neville6_update(c0, d0, c1, h0, h1, x) ||
+	    !d_neville6_update(c1, d1, c2, h1, h2, x) ||
+	    !d_neville6_update(c2, d2, c3, h2, h3, x) ||
+	    !d_neville6_update(c3, d3, c4, h3, h4, x) ||
+	    !d_neville6_update(c4, d4, c5, h4, h5, x)) return NAN;
+	if (2 * ns < (MAX_ORDN - 1)) {
+		dy = d_select6_scalar(ns, c0, c1, c2, c3, c4, c5);
+	} else {
+		dy = d_select6_scalar(ns - 1, d0, d1, d2, d3, d4, d5);
+		ns = ns - 1;
+	}
+	y = y + dy;
+
+	if (!d_neville6_update(c0, d0, c1, h0, h2, x) ||
+	    !d_neville6_update(c1, d1, c2, h1, h3, x) ||
+	    !d_neville6_update(c2, d2, c3, h2, h4, x) ||
+	    !d_neville6_update(c3, d3, c4, h3, h5, x)) return NAN;
+	if (2 * ns < (MAX_ORDN - 2)) {
+		dy = d_select6_scalar(ns, c0, c1, c2, c3, c4, c5);
+	} else {
+		dy = d_select6_scalar(ns - 1, d0, d1, d2, d3, d4, d5);
+		ns = ns - 1;
+	}
+	y = y + dy;
+
+	if (!d_neville6_update(c0, d0, c1, h0, h3, x) ||
+	    !d_neville6_update(c1, d1, c2, h1, h4, x) ||
+	    !d_neville6_update(c2, d2, c3, h2, h5, x)) return NAN;
+	if (2 * ns < (MAX_ORDN - 3)) {
+		dy = d_select6_scalar(ns, c0, c1, c2, c3, c4, c5);
+	} else {
+		dy = d_select6_scalar(ns - 1, d0, d1, d2, d3, d4, d5);
+		ns = ns - 1;
+	}
+	y = y + dy;
+
+	if (!d_neville6_update(c0, d0, c1, h0, h4, x) ||
+	    !d_neville6_update(c1, d1, c2, h1, h5, x)) return NAN;
+	if (2 * ns < (MAX_ORDN - 4)) {
+		dy = d_select6_scalar(ns, c0, c1, c2, c3, c4, c5);
+	} else {
+		dy = d_select6_scalar(ns - 1, d0, d1, d2, d3, d4, d5);
+		ns = ns - 1;
+	}
+	y = y + dy;
+
+	if (!d_neville6_update(c0, d0, c1, h0, h5, x)) return NAN;
+	if (2 * ns < (MAX_ORDN - 5)) {
+		dy = d_select6_scalar(ns, c0, c1, c2, c3, c4, c5);
+	} else {
+		dy = d_select6_scalar(ns - 1, d0, d1, d2, d3, d4, d5);
+		ns = ns - 1;
+	}
+	y = y + dy;
+	return y;
+}
+
+__device__ __forceinline__ double d_interp_zrow6_scalar(
+	const int ex[3], const double* f, const int cxB[3],
+	const double SoA[3], int i, int j, double x3
+) {
+	const int ii = cxB[0] + i;
+	const int jj = cxB[1] + j;
+	const int kk = cxB[2];
+	const double q0 = d_interp_sample_1b_exact(f, ex, ii, jj, kk, SoA);
+	const double q1 = d_interp_sample_1b_exact(f, ex, ii, jj, kk + 1, SoA);
+	const double q2 = d_interp_sample_1b_exact(f, ex, ii, jj, kk + 2, SoA);
+	const double q3 = d_interp_sample_1b_exact(f, ex, ii, jj, kk + 3, SoA);
+	const double q4 = d_interp_sample_1b_exact(f, ex, ii, jj, kk + 4, SoA);
+	const double q5 = d_interp_sample_1b_exact(f, ex, ii, jj, kk + 5, SoA);
+	return d_polint6_scalar(q0, q1, q2, q3, q4, q5, x3);
+}
+
+__device__ __forceinline__ double d_interp_yplane6_scalar(
+	const int ex[3], const double* f, const int cxB[3],
+	const double cx[3], const double SoA[3], int i
+) {
+	const double q0 = d_interp_zrow6_scalar(ex, f, cxB, SoA, i, 0, cx[2]);
+	const double q1 = d_interp_zrow6_scalar(ex, f, cxB, SoA, i, 1, cx[2]);
+	const double q2 = d_interp_zrow6_scalar(ex, f, cxB, SoA, i, 2, cx[2]);
+	const double q3 = d_interp_zrow6_scalar(ex, f, cxB, SoA, i, 3, cx[2]);
+	const double q4 = d_interp_zrow6_scalar(ex, f, cxB, SoA, i, 4, cx[2]);
+	const double q5 = d_interp_zrow6_scalar(ex, f, cxB, SoA, i, 5, cx[2]);
+	return d_polint6_scalar(q0, q1, q2, q3, q4, q5, cx[1]);
+}
+
 __device__ void d_polin3_streaming6_legacy(
-	const double* xa, const int ex[3], const double* f,
+	const int ex[3], const double* f,
 	const int cxB[3], const double cx[3], const double SoA[3],
 	double& y
 ) {
-	double ymtmp[MAX_ORDN];
-	double yntmp[MAX_ORDN];
-	double yqtmp[MAX_ORDN];
-	double dy = 0.0;
-	for (int i = 0; i < MAX_ORDN; ++i) {
-		for (int j = 0; j < MAX_ORDN; ++j) {
-			for (int k = 0; k < MAX_ORDN; ++k) {
-				yqtmp[k] = d_interp_sample_1b_exact(
-					f, ex, cxB[0] + i, cxB[1] + j, cxB[2] + k, SoA
-				);
-			}
-			polint(xa, yqtmp, cx[2], yntmp[j], dy, MAX_ORDN);
-		}
-		polint(xa, yntmp, cx[1], ymtmp[i], dy, MAX_ORDN);
-	}
-	polint(xa, ymtmp, cx[0], y, dy, MAX_ORDN);
+	const double q0 = d_interp_yplane6_scalar(ex, f, cxB, cx, SoA, 0);
+	const double q1 = d_interp_yplane6_scalar(ex, f, cxB, cx, SoA, 1);
+	const double q2 = d_interp_yplane6_scalar(ex, f, cxB, cx, SoA, 2);
+	const double q3 = d_interp_yplane6_scalar(ex, f, cxB, cx, SoA, 3);
+	const double q4 = d_interp_yplane6_scalar(ex, f, cxB, cx, SoA, 4);
+	const double q5 = d_interp_yplane6_scalar(ex, f, cxB, cx, SoA, 5);
+	y = d_polint6_scalar(q0, q1, q2, q3, q4, q5, cx[0]);
 }
 
 __device__ void global_interp6_streaming_device(
@@ -282,9 +429,6 @@ __device__ void global_interp6_streaming_device(
 	const double dX = X_at_1b(X, 2) - X_at_1b(X, 1);
 	const double dY = X_at_1b(Y, 2) - X_at_1b(Y, 1);
 	const double dZ = X_at_1b(Z, 2) - X_at_1b(Z, 1);
-	double x1a[MAX_ORDN];
-	for (int j = 0; j < MAX_ORDN; ++j) x1a[j] = (double)j;
-
 	int cxI[3];
 	cxI[0] = (int)((x1 - X_at_1b(X, 1)) / dX + 0.4) + 1;
 	cxI[1] = (int)((y1 - X_at_1b(Y, 1)) / dY + 0.4) + 1;
@@ -321,7 +465,7 @@ __device__ void global_interp6_streaming_device(
 		gpu_stop();
 		return;
 	}
-	d_polin3_streaming6_legacy(x1a, ex, f, cxB, cx, SoA, f_int[0]);
+	d_polin3_streaming6_legacy(ex, f, cxB, cx, SoA, f_int[0]);
 }
 
 __device__ double d_symmetry_bd_1b(
