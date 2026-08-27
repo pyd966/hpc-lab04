@@ -248,6 +248,211 @@ __global__ void rhs_beta_gamma_kernel(RHS_KERNEL_PARAMS) {
     Ayy_rhs[idx] = dGamzy;
     Ayz_rhs[idx] = dGamzz;
 }
+
+// Equatorial fast path: keep the beta-Hessian producer values on chip until
+// the Gamma RHS consumer has used them. Gamma derivatives deliberately retain
+// the established point stencil in this first fused version.
+__global__ void rhs_beta_gamma_equatorial_compact_kernel(RHS_KERNEL_PARAMS) {
+    const int base_i = blockIdx.x * COMPACT_HESSIAN_BX;
+    const int base_j = blockIdx.y * COMPACT_HESSIAN_BY;
+    const int base_k = blockIdx.z * COMPACT_HESSIAN_BZ;
+    const bool block_interior =
+        base_i >= COMPACT_HESSIAN_RADIUS &&
+        base_j >= COMPACT_HESSIAN_RADIUS &&
+        base_k >= COMPACT_HESSIAN_RADIUS &&
+        base_i + COMPACT_HESSIAN_BX + COMPACT_HESSIAN_RADIUS <= ex0 &&
+        base_j + COMPACT_HESSIAN_BY + COMPACT_HESSIAN_RADIUS <= ex1 &&
+        base_k + COMPACT_HESSIAN_BZ + COMPACT_HESSIAN_RADIUS <= ex2;
+
+    const int tx = threadIdx.x;
+    const int ty = threadIdx.y;
+    const int tz = threadIdx.z;
+    const int tid = tx + COMPACT_HESSIAN_BX *
+        (ty + COMPACT_HESSIAN_BY * tz);
+    const int threads = COMPACT_HESSIAN_BX *
+        COMPACT_HESSIAN_BY * COMPACT_HESSIAN_BZ;
+    const int i = base_i + tx;
+    const int j = base_j + ty;
+    const int k = base_k + tz;
+    const bool valid = i < ex0 && j < ex1 && k < ex2;
+    const bool active = valid && i < ex0 - 1 && j < ex1 - 1 && k < ex2 - 1;
+    const int idx = valid ? IDX3D(i, j, k, ex0, ex1, ex2) : 0;
+
+    __shared__ double tile[COMPACT_HESSIAN_TILE_SIZE];
+    __shared__ double prepared[9][
+        COMPACT_HESSIAN_BX * COMPACT_HESSIAN_BY * COMPACT_HESSIAN_BZ];
+    __shared__ double scales[12];
+    __shared__ int kmin_shared;
+    if (tid == 0) {
+        const double dx = X[1] - X[0];
+        const double dy = Y[1] - Y[0];
+        const double dz = Z[1] - Z[0];
+        scales[0] = 1.0 / (dx * dx);
+        scales[1] = 1.0 / (dy * dy);
+        scales[2] = 1.0 / (dz * dz);
+        scales[3] = (1.0 / 12.0) / (dx * dx);
+        scales[4] = (1.0 / 12.0) / (dy * dy);
+        scales[5] = (1.0 / 12.0) / (dz * dz);
+        scales[6] = 0.25 / (dx * dy);
+        scales[7] = 0.25 / (dx * dz);
+        scales[8] = 0.25 / (dy * dz);
+        scales[9] = (1.0 / 144.0) / (dx * dy);
+        scales[10] = (1.0 / 144.0) / (dx * dz);
+        scales[11] = (1.0 / 144.0) / (dy * dz);
+        kmin_shared = (fabs(Z[0]) < dz) ? -2 : 0;
+    }
+    __syncthreads();
+
+    const double gupxx = valid ? betax_rhs[idx] : 0.0;
+    const double gupxy = valid ? betay_rhs[idx] : 0.0;
+    const double gupxz = valid ? betaz_rhs[idx] : 0.0;
+    const double gupyy = valid ? dtSfx_rhs[idx] : 0.0;
+    const double gupyz = valid ? dtSfy_rhs[idx] : 0.0;
+    const double gupzz = valid ? dtSfz_rhs[idx] : 0.0;
+    const int center_index = compact_hessian_tile_index(
+        tx + COMPACT_HESSIAN_RADIUS,
+        ty + COMPACT_HESSIAN_RADIUS,
+        tz + COMPACT_HESSIAN_RADIUS
+    );
+
+#pragma unroll 1
+    for (int field_index = 0; field_index < 3; ++field_index) {
+        const double* field =
+            field_index == 0 ? betax : (field_index == 1 ? betay : betaz);
+        const int parity_x = field_index == 0 ? -1 : 1;
+        const int parity_y = field_index == 1 ? -1 : 1;
+        const int parity_z = field_index == 2 ? -1 : 1;
+        for (int p = tid; p < COMPACT_HESSIAN_LOGICAL_SIZE; p += threads) {
+            const int tile_i = p % COMPACT_HESSIAN_SX;
+            const int q = p / COMPACT_HESSIAN_SX;
+            const int tile_j = q % COMPACT_HESSIAN_SY;
+            const int tile_k = q / COMPACT_HESSIAN_SY;
+            const int gi = base_i + tile_i - COMPACT_HESSIAN_RADIUS;
+            const int gj = base_j + tile_j - COMPACT_HESSIAN_RADIUS;
+            const int gk = base_k + tile_k - COMPACT_HESSIAN_RADIUS;
+            const int tile_index = compact_hessian_tile_index(
+                tile_i, tile_j, tile_k
+            );
+            tile[tile_index] = block_interior
+                ? field[gi + ex0 * (gj + ex1 * gk)]
+                : compact_hessian_symmetry_load(
+                    field, gi, gj, gk, ex0, ex1, ex2,
+                    parity_x, parity_y, parity_z
+                );
+        }
+        __syncthreads();
+
+        if (valid) {
+            double hxx, hxy, hxz, hyy, hyz, hzz;
+            compact_hessian_derivatives_from_tile(
+                tile, center_index, active, i, j, k,
+                ex0, ex1, ex2, kmin_shared, scales,
+                hxx, hxy, hxz, hyy, hyz, hzz
+            );
+            prepared[3 + field_index][tid] =
+                gupxx * hxx + gupyy * hyy + gupzz * hzz +
+                TWO * (gupxy * hxy + gupxz * hxz + gupyz * hyz);
+            if (field_index == 0) {
+                prepared[0][tid] = hxx;
+                prepared[1][tid] = hxy;
+                prepared[2][tid] = hxz;
+            } else if (field_index == 1) {
+                prepared[0][tid] += hxy;
+                prepared[1][tid] += hyy;
+                prepared[2][tid] += hyz;
+            } else {
+                prepared[0][tid] += hxz;
+                prepared[1][tid] += hyz;
+                prepared[2][tid] += hzz;
+            }
+        }
+        if (field_index + 1 < 3) __syncthreads();
+    }
+
+    if (valid) {
+        prepared[6][tid] =
+            gupxx * Gamxxx[idx] + gupyy * Gamxyy[idx] +
+            gupzz * Gamxzz[idx] + TWO * (
+                gupxy * Gamxxy[idx] + gupxz * Gamxxz[idx] +
+                gupyz * Gamxyz[idx]);
+        prepared[7][tid] =
+            gupxx * Gamyxx[idx] + gupyy * Gamyyy[idx] +
+            gupzz * Gamyzz[idx] + TWO * (
+                gupxy * Gamyxy[idx] + gupxz * Gamyxz[idx] +
+                gupyz * Gamyyz[idx]);
+        prepared[8][tid] =
+            gupxx * Gamzxx[idx] + gupyy * Gamzyy[idx] +
+            gupzz * Gamzzz[idx] + TWO * (
+                gupxy * Gamzxy[idx] + gupxz * Gamzxz[idx] +
+                gupyz * Gamzyz[idx]);
+    }
+    __syncthreads();
+
+    if (valid) {
+        const double betazx = Axx_rhs[idx];
+        const double betazy = Axy_rhs[idx];
+        const double betazz = Axz_rhs[idx];
+        const double betaxx = gxx_rhs[idx];
+        const double betaxy = gxy_rhs[idx];
+        const double betaxz = gxz_rhs[idx];
+        const double betayx = gyy_rhs[idx];
+        const double betayy = gyz_rhs[idx];
+        const double betayz = gzz_rhs[idx];
+        const double div_beta = betaxx + betayy + betazz;
+        const double fxx = prepared[0][tid];
+        const double fxy = prepared[1][tid];
+        const double fxz = prepared[2][tid];
+        const double Gamxa = prepared[6][tid];
+        const double Gamya = prepared[7][tid];
+        const double Gamza = prepared[8][tid];
+
+        double val_Gamx_rhs = Gamx_rhs[idx];
+        double val_Gamy_rhs = Gamy_rhs[idx];
+        double val_Gamz_rhs = Gamz_rhs[idx];
+        val_Gamx_rhs +=
+            F2o3 * Gamxa * div_beta -
+            (Gamxa * betaxx + Gamya * betaxy + Gamza * betaxz) +
+            F1o3 * (gupxx * fxx + gupxy * fxy + gupxz * fxz) +
+            prepared[3][tid];
+        val_Gamy_rhs +=
+            F2o3 * Gamya * div_beta -
+            (Gamxa * betayx + Gamya * betayy + Gamza * betayz) +
+            F1o3 * (gupxy * fxx + gupyy * fxy + gupyz * fxz) +
+            prepared[4][tid];
+        val_Gamz_rhs +=
+            F2o3 * Gamza * div_beta -
+            (Gamxa * betazx + Gamya * betazy + Gamza * betazz) +
+            F1o3 * (gupxz * fxx + gupyz * fxy + gupzz * fxz) +
+            prepared[5][tid];
+
+        Gamx_rhs[idx] = val_Gamx_rhs;
+        Gamy_rhs[idx] = val_Gamy_rhs;
+        Gamz_rhs[idx] = val_Gamz_rhs;
+        Azz_rhs[idx] = Gamza;
+
+        const int dims[3] = {ex0, ex1, ex2};
+        double dGamxx, dGamxy, dGamxz;
+        double dGamyx, dGamyy, dGamyz;
+        double dGamzx, dGamzy, dGamzz;
+        d_fderivs_point(dims, Gamx, &dGamxx, &dGamxy, &dGamxz,
+                        X, Y, Z, ANTI, SYM, SYM, symmetry, lev, i, j, k);
+        d_fderivs_point(dims, Gamy, &dGamyx, &dGamyy, &dGamyz,
+                        X, Y, Z, SYM, ANTI, SYM, symmetry, lev, i, j, k);
+        d_fderivs_point(dims, Gamz, &dGamzx, &dGamzy, &dGamzz,
+                        X, Y, Z, SYM, SYM, ANTI, symmetry, lev, i, j, k);
+
+        ham_Res[idx] = dGamxx;
+        movx_Res[idx] = dGamxy;
+        movy_Res[idx] = dGamxz;
+        movz_Res[idx] = dGamyx;
+        Gmx_Res[idx] = dGamyy;
+        Gmy_Res[idx] = dGamyz;
+        Gmz_Res[idx] = dGamzx;
+        Ayy_rhs[idx] = dGamzy;
+        Ayz_rhs[idx] = dGamzz;
+    }
+}
+
 __global__ void rhs_ricci_connection_diag_kernel(RHS_KERNEL_PARAMS) {
     (void)T; (void)chi; (void)trK; (void)Axx; (void)Axy; (void)Axz; (void)Ayy; (void)Ayz; (void)Azz;
     (void)Lap; (void)betax; (void)betay; (void)betaz; (void)dtSfx; (void)dtSfy; (void)dtSfz;
@@ -1733,57 +1938,13 @@ void gpu_compute_rhs_bssn_launch( // launch kernel with device pointers
     rhs_gamma_seed_fused_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
     // 1. Kernel 1: Derivatives & Connection Coefficients
     if (symmetry == 1) {
-        CompactBetaPrepareFields beta_prepare_fields{};
-        const double* beta_inputs[COMPACT_BETA_FIELDS] = {
-            d_betax, d_betay, d_betaz
-        };
-        double* beta_divergence[COMPACT_BETA_FIELDS] = {
-            d_ham_Res, d_movx_Res, d_movy_Res
-        };
-        double* beta_laplacian[COMPACT_BETA_FIELDS] = {
-            d_movz_Res, d_Gmx_Res, d_Gmy_Res
-        };
-        const int beta_x_parity[COMPACT_BETA_FIELDS] = {-1, 1, 1};
-        const int beta_y_parity[COMPACT_BETA_FIELDS] = {1, -1, 1};
-        const int beta_z_parity[COMPACT_BETA_FIELDS] = {1, 1, -1};
-        for (int field = 0; field < COMPACT_BETA_FIELDS; ++field) {
-            beta_prepare_fields.input[field] = beta_inputs[field];
-            beta_prepare_fields.divergence[field] = beta_divergence[field];
-            beta_prepare_fields.laplacian[field] = beta_laplacian[field];
-            beta_prepare_fields.parity_x[field] = beta_x_parity[field];
-            beta_prepare_fields.parity_y[field] = beta_y_parity[field];
-            beta_prepare_fields.parity_z[field] = beta_z_parity[field];
-        }
-
-        CompactConnectionFields connection_fields{};
-        const double* connection_inputs[COMPACT_BETA_FIELDS]
-            [COMPACT_CONNECTION_COMPONENTS] = {
-                {d_Gamxxx, d_Gamxxy, d_Gamxxz, d_Gamxyy, d_Gamxyz, d_Gamxzz},
-                {d_Gamyxx, d_Gamyxy, d_Gamyxz, d_Gamyyy, d_Gamyyz, d_Gamyzz},
-                {d_Gamzxx, d_Gamzxy, d_Gamzxz, d_Gamzyy, d_Gamzyz, d_Gamzzz}
-            };
-        double* connection_outputs[COMPACT_BETA_FIELDS] = {
-            d_Ayy_rhs, d_Ayz_rhs, d_Azz_rhs
-        };
-        for (int upper = 0; upper < COMPACT_BETA_FIELDS; ++upper) {
-            for (int component = 0;
-                 component < COMPACT_CONNECTION_COMPONENTS; ++component) {
-                connection_fields.input[upper][component] =
-                    connection_inputs[upper][component];
-            }
-            connection_fields.contracted[upper] = connection_outputs[upper];
-        }
-
-        launch_rhs_beta_gamma_prepare_equatorial_compact(
-            stream, ex[0], ex[1], ex[2], d_X, d_Y, d_Z,
-            d_betax_rhs, d_betay_rhs, d_betaz_rhs,
-            d_dtSfx_rhs, d_dtSfy_rhs, d_dtSfz_rhs,
-            beta_prepare_fields, connection_fields
+        rhs_beta_gamma_equatorial_compact_kernel<<<grid, block, 0, stream>>>(
+            RHS_LAUNCH_ARGS
         );
     } else {
         rhs_beta_gamma_prepare_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
+        rhs_beta_gamma_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
     }
-    rhs_beta_gamma_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
     if (symmetry == 1) {
         CompactHessianFields hessian_fields{};
         const double* hessian_inputs[COMPACT_HESSIAN_FIELDS] = {
