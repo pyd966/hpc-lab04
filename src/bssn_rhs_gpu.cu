@@ -1878,8 +1878,9 @@ void gpu_compute_rhs_bssn_launch( // launch kernel with device pointers
         }
     }
 
-    // Kernel 3: constraints are only needed for the predictor stage.
-    if (co == 0 || constraint_only) {
+    // Constraint_Out recomputes every refined level before consuming these
+    // diagnostics. Only level 0 is reused from the predictor stage.
+    if ((co == 0 && lev == 0) || constraint_only) {
         rhs_constraints_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
     }
 #undef RHS_LAUNCH_ARGS
