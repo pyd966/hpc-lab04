@@ -1301,7 +1301,7 @@ __global__ void rhs_constraints_kernel(RHS_KERNEL_PARAMS) {
     (void)betax_rhs; (void)betay_rhs; (void)betaz_rhs;
     (void)dtSfx_rhs; (void)dtSfy_rhs; (void)dtSfz_rhs;
     (void)Sxx; (void)Sxy; (void)Sxz; (void)Syy; (void)Syz; (void)Szz;
-    if (co != 0) return;
+    if (co != 0 && co != RHS_CONSTRAINT_ONLY) return;
 
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     const int j = blockIdx.y * blockDim.y + threadIdx.y;
@@ -1513,6 +1513,7 @@ void gpu_compute_rhs_bssn_launch( // launch kernel with device pointers
     double* d_Gmx_Res, double* d_Gmy_Res, double* d_Gmz_Res,
     int symmetry, int lev, double eps, int co
 ) {
+    const bool constraint_only = (co == RHS_CONSTRAINT_ONLY);
     dim3 block(8, 8, 4); // 调整 block size 以适应架构
     dim3 grid(
         (ex[0] + block.x - 1) / block.x,
@@ -1533,23 +1534,26 @@ void gpu_compute_rhs_bssn_launch( // launch kernel with device pointers
     rhs_evolution_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
     rhs_ricci_connection_diag_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
     rhs_ricci_connection_offdiag_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
-    // Multi-stage source fission: metric, Chi, Gamma, lapse, trace, Aij, then gauge.
-    rhs_source_metric_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
-    rhs_source_chi_hessian_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
-    rhs_source_chi_ricci_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
-    rhs_source_physical_gamma_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
-    rhs_source_lapse_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
-    // Gauge runs last because the Aij kernels still consume inverse metric values in the gauge RHS slots.
-    rhs_source_trace_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
-    rhs_source_a_diag_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
-    rhs_source_a_offdiag_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
-    rhs_source_gauge_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
+    // Source and advection mutate RHS arrays but are not consumed by constraints.
+    if (!constraint_only) {
+        // Multi-stage source fission: metric, Chi, Gamma, lapse, trace, Aij, then gauge.
+        rhs_source_metric_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
+        rhs_source_chi_hessian_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
+        rhs_source_chi_ricci_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
+        rhs_source_physical_gamma_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
+        rhs_source_lapse_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
+        // Gauge runs last because the Aij kernels still consume inverse metric values in the gauge RHS slots.
+        rhs_source_trace_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
+        rhs_source_a_diag_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
+        rhs_source_a_offdiag_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
+        rhs_source_gauge_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
 
-    // Kernel 2: independent advection and KO dissipation.
-    rhs_advection_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
+        // Kernel 2: independent advection and KO dissipation.
+        rhs_advection_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
+    }
 
     // Kernel 3: constraints are only needed for the predictor stage.
-    if (co == 0) {
+    if (co == 0 || constraint_only) {
         rhs_constraints_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
     }
 #undef RHS_LAUNCH_ARGS

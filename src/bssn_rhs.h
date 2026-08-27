@@ -35,6 +35,9 @@ extern "C"
 
 #ifdef USE_GPU
 #include <cuda_runtime.h>
+// Negative co selects the producer chain needed only to evaluate constraints.
+constexpr int RHS_CONSTRAINT_ONLY = -1;
+
 void gpu_compute_rhs_bssn_launch( // launch kernel with device pointers
     cudaStream_t &stream,
     int* ex, double T, double* d_X, double* d_Y, double* d_Z,

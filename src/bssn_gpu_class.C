@@ -2877,7 +2877,7 @@ void bssn_class::Constraint_Out()
                                     cg->d_fgfs[Cons_Ham->sgfn],
                                     cg->d_fgfs[Cons_Px->sgfn], cg->d_fgfs[Cons_Py->sgfn], cg->d_fgfs[Cons_Pz->sgfn],
                                     cg->d_fgfs[Cons_Gx->sgfn], cg->d_fgfs[Cons_Gy->sgfn], cg->d_fgfs[Cons_Gz->sgfn],
-                                    Symmetry, lev, ndeps, pre
+                                    Symmetry, lev, ndeps, RHS_CONSTRAINT_ONLY
                                 );
                             }
                             else
@@ -2987,7 +2987,7 @@ void bssn_class::Interp_Constraint(bool infg)
                                     cg->d_fgfs[Cons_Ham->sgfn],
                                     cg->d_fgfs[Cons_Px->sgfn], cg->d_fgfs[Cons_Py->sgfn], cg->d_fgfs[Cons_Pz->sgfn],
                                     cg->d_fgfs[Cons_Gx->sgfn], cg->d_fgfs[Cons_Gy->sgfn], cg->d_fgfs[Cons_Gz->sgfn],
-                                    Symmetry, lev, ndeps, pre
+                                    Symmetry, lev, ndeps, RHS_CONSTRAINT_ONLY
                                 );
                             }
                             else
@@ -3256,7 +3256,7 @@ void bssn_class::Compute_Constraint()
                             cg->d_fgfs[Cons_Ham->sgfn],
                             cg->d_fgfs[Cons_Px->sgfn], cg->d_fgfs[Cons_Py->sgfn], cg->d_fgfs[Cons_Pz->sgfn],
                             cg->d_fgfs[Cons_Gx->sgfn], cg->d_fgfs[Cons_Gy->sgfn], cg->d_fgfs[Cons_Gz->sgfn],
-                            Symmetry, lev, ndeps, pre
+                            Symmetry, lev, ndeps, RHS_CONSTRAINT_ONLY
                         );
                         GPUManager::getInstance().synchronize_streams(&cg->stream, 1);
                         cg->move_to_cpu(RHSList);

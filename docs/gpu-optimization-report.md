@@ -1,13 +1,14 @@
 # GPU 优化到 370 秒的 Profile 报告
 
-**日期：** 2026-08-26  
+**日期：** 2026-08-27
 **目标：** 官方 `t=100` 运行时间 `<=370s`  
-**当前版本：** P0-A 实验实现（本次提交）
+**当前版本：** P0-B 实验实现（本次提交）
 
 ## 1. 结论
 
-当前主线还没有接近 `370s`。已有生产构建 benchmark 的 `t=5` 三次结果为
-`89.150199 +/- 0.301396s`。按当前演化阶段近似线性外推，`t=100` 约为
+当前主线还没有接近 `370s`。阶段 4 基线的 `t=5` 三次结果为
+`89.150199 +/- 0.301396s`；P0-A 为 `84.722587s`，P0-B 当前为
+`83.529860 +/- 0.283895s`。按当前演化阶段近似线性外推，`t=100` 约为
 `1226s`；目标要求演化部分从约 `11.97s/单位时间` 降到约 `3.4s/单位时间`，
 约需要 `3.5x` 的整体演化加速。
 
@@ -25,6 +26,8 @@ profile 在 HPC A100 MIG（`1g.10gb`，SM80）上执行，正确性检查通过�
 
 - Nsight Systems：job `171518`，`profile/gpu-nsys-20260826T155727Z-65`
 - Nsight Compute：job `171582`，`profile/gpu-ncu-20260826T160405Z-64`
+- P0-B Nsight Systems：job `174898`，`profile/gpu-nsys-20260827T022226Z-65`
+- P0-B benchmark：job `174882`，`profile/gpu-benchmark-20260827T021603Z-66`
 - profile 覆盖当前代码的 `t=0..1`；绝对时间以生产构建 benchmark 为准，Nsight 结果用于确定瓶颈结构。
 
 ### 2.1 GPU kernel 热点
@@ -122,19 +125,37 @@ kernel wall time 和 `t=5` 端到端时间，不能只看 register 数。
 ### P0-B：为约束输出建立 constraint-only RHS 路径
 
 在 [`bssn_gpu_class.C`](/home/h3250106394/lab04/src/bssn_gpu_class.C:2819) 的
-约束输出流程中，当前调用完整的 `gpu_compute_rhs_bssn_launch`。该 launcher 在
-[`bssn_rhs_gpu.cu`](/home/h3250106394/lab04/src/bssn_rhs_gpu.cu:1524) 中会启动
-完整的 advection、source、gauge 和其它 RHS kernel，但约束只需要几何量、Ricci、
-Gamma 及相关导数。
+约束输出、约束插值和初始化约束计算中，原来都调用完整的
+`gpu_compute_rhs_bssn_launch`，因此会重复启动 source/gauge 和 advection/KO。
+本轮在 [`bssn_rhs.h`](/home/h3250106394/lab04/src/bssn_rhs.h:38) 定义
+`RHS_CONSTRAINT_ONLY = -1`，复用同一 launcher 的接口切换调度模式：
 
-应根据数据依赖拆出约束专用链，验证是否可以跳过：
+- 保留 geometry、Ricci-A、Gamma derivative/seed、beta-Gamma、evolution 和 Ricci connection producer；
+- 跳过全部 `rhs_source_*`、`rhs_source_gauge_kernel` 和 `rhs_advection_kernel`；
+- 仍运行 `rhs_constraints_kernel`，并让它接受 `co=-1`；
+- 正常 RK4 的 `co=0/1` 路径保持不变。
 
-- `rhs_advection_kernel`；
-- lapse/source、gauge/source、A source、trace/source 等 kernel；
-- 不被 `rhs_constraints_kernel` 读取的 RHS 后处理。
+约束 kernel 直接读取 state、物理 Christoffel/Ricci producer 输出和物质变量，
+不读取被跳过的 RHS source/advection 结果，因此该依赖裁剪不改变数值定义。
 
-可能保留 geometry、Ricci/Gamma producer 和 constraint kernel，但必须逐项确认依赖，
-并对所有约束 checker 做回归。这个方向直接消除重复计算，优先级高于 RK4 微优化。
+#### P0-B 实测结果（2026-08-27）
+
+| 版本 | `t=5` program mean | 结果 |
+|---|---:|---|
+| P0-A 最终版本 | `84.722587s`（单次复验） | PASS |
+| P0-B constraint-only | `83.529860 +/- 0.283895s` | 3/3 PASS |
+
+P0-B 相对 P0-A 的 program cost 降低约 `1.4%`。benchmark artifact 为
+`gpu-benchmark-20260827T021603Z-66`，三次 program cost 分别为
+`83.282611s`、`83.467078s`、`83.839890s`；轨迹 RMS 为 `0`，
+约束 checker 的 level-0 最大值为 `Ham=0.025628463`、`Px=0.012645773`、
+`Py=0.012757900`、`Pz=0.025120159`。
+
+Nsys artifact `gpu-nsys-20260827T022226Z-65`（`t=1`）验证了调度裁剪：
+P0-A 的 source/advection 各为 `420` 次，P0-B 各为 `392` 次，而约束 kernel
+仍为 `126` 次。P0-B 的关键总 GPU 时间为 `rhs_advection=2.475s/392`
+（正常 RHS 调用部分）、`rhs_evolution=1.699s/420`、`rhs_constraints=0.368s/126`；
+profile checker 也为 PASS。
 
 ### P1-A：继续改进 RHS 的空间数据流
 
