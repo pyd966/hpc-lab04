@@ -215,6 +215,115 @@ __device__ void global_interp_device(
 	d_polin3_1b(x1a, x1a, x1a, ya, cx[0], cx[1], cx[2], f_int[0], ddy, ORDN);
 }
 
+__device__ __forceinline__ bool d_validate_interp6_bounds(
+	const int ex[3], const int cxB[3], const int cxT[3]
+) {
+	for (int m = 0; m < 3; ++m) {
+		const int fmin1 = max(1, cxB[m]);
+		const int fmax1 = cxT[m];
+		const int fmin2 = cxB[m];
+		const int fmax2 = min(0, cxT[m]);
+		if ((fmin1 <= fmax1) && (fmin1 < 1 || fmax1 > ex[m])) return true;
+		if ((fmin2 <= fmax2) && (1 - fmax2 < 1 || 1 - fmin2 > ex[m])) return true;
+	}
+	return false;
+}
+
+__device__ __forceinline__ double d_interp_sample_1b_exact(
+	const double* f, const int ex[3], int i, int j, int k,
+	const double SoA[3]
+) {
+	if (k > 0) {
+		if (j > 0) {
+			if (i > 0) return f_at_1b(f, ex, i, j, k);
+			return f_at_1b(f, ex, 1 - i, j, k) * SoA[0];
+		}
+		if (i > 0) return f_at_1b(f, ex, i, 1 - j, k) * SoA[1];
+		return f_at_1b(f, ex, 1 - i, 1 - j, k) * SoA[0] * SoA[1];
+	}
+	if (j > 0) {
+		if (i > 0) return f_at_1b(f, ex, i, j, 1 - k) * SoA[2];
+		return f_at_1b(f, ex, 1 - i, j, 1 - k) * SoA[0] * SoA[2];
+	}
+	if (i > 0) return f_at_1b(f, ex, i, 1 - j, 1 - k) * SoA[1] * SoA[2];
+	return f_at_1b(f, ex, 1 - i, 1 - j, 1 - k) * SoA[0] * SoA[1] * SoA[2];
+}
+
+__device__ void d_polin3_streaming6_legacy(
+	const double* xa, const int ex[3], const double* f,
+	const int cxB[3], const double cx[3], const double SoA[3],
+	double& y
+) {
+	double ymtmp[MAX_ORDN];
+	double yntmp[MAX_ORDN];
+	double yqtmp[MAX_ORDN];
+	double dy = 0.0;
+	for (int i = 0; i < MAX_ORDN; ++i) {
+		for (int j = 0; j < MAX_ORDN; ++j) {
+			for (int k = 0; k < MAX_ORDN; ++k) {
+				yqtmp[k] = d_interp_sample_1b_exact(
+					f, ex, cxB[0] + i, cxB[1] + j, cxB[2] + k, SoA
+				);
+			}
+			polint(xa, yqtmp, cx[2], yntmp[j], dy, MAX_ORDN);
+		}
+		polint(xa, yntmp, cx[1], ymtmp[i], dy, MAX_ORDN);
+	}
+	polint(xa, ymtmp, cx[0], y, dy, MAX_ORDN);
+}
+
+__device__ void global_interp6_streaming_device(
+	const int ex[3], const double* X, const double* Y, const double* Z,
+	const double* f, double* f_int,
+	double x1, double y1, double z1,
+	const double SoA[3], int symmetry
+) {
+	const int NO_SYMM = 0, OCTANT = 2;
+	const double dX = X_at_1b(X, 2) - X_at_1b(X, 1);
+	const double dY = X_at_1b(Y, 2) - X_at_1b(Y, 1);
+	const double dZ = X_at_1b(Z, 2) - X_at_1b(Z, 1);
+	double x1a[MAX_ORDN];
+	for (int j = 0; j < MAX_ORDN; ++j) x1a[j] = (double)j;
+
+	int cxI[3];
+	cxI[0] = (int)((x1 - X_at_1b(X, 1)) / dX + 0.4) + 1;
+	cxI[1] = (int)((y1 - X_at_1b(Y, 1)) / dY + 0.4) + 1;
+	cxI[2] = (int)((z1 - X_at_1b(Z, 1)) / dZ + 0.4) + 1;
+
+	int cxB[3], cxT[3], cmin[3], cmax[3];
+	for (int m = 0; m < 3; ++m) {
+		cxB[m] = cxI[m] - MAX_ORDN / 2 + 1;
+		cxT[m] = cxB[m] + MAX_ORDN - 1;
+		cmin[m] = 1;
+		cmax[m] = ex[m];
+	}
+	if (symmetry == OCTANT && fabs(X_at_1b(X, 1)) < dX) cmin[0] = -MAX_ORDN / 2 + 1;
+	if (symmetry == OCTANT && fabs(X_at_1b(Y, 1)) < dY) cmin[1] = -MAX_ORDN / 2 + 1;
+	if (symmetry != NO_SYMM && fabs(X_at_1b(Z, 1)) < dZ) cmin[2] = -MAX_ORDN / 2 + 1;
+	for (int m = 0; m < 3; ++m) {
+		if (cxB[m] < cmin[m]) { cxB[m] = cmin[m]; cxT[m] = cxB[m] + MAX_ORDN - 1; }
+		if (cxT[m] > cmax[m]) { cxT[m] = cmax[m]; cxB[m] = cxT[m] + 1 - MAX_ORDN; }
+	}
+
+	double cx[3];
+	cx[0] = (cxB[0] > 0) ? (x1 - X_at_1b(X, cxB[0])) / dX : (x1 + X_at_1b(X, 1 - cxB[0])) / dX;
+	cx[1] = (cxB[1] > 0) ? (y1 - X_at_1b(Y, cxB[1])) / dY : (y1 + X_at_1b(Y, 1 - cxB[1])) / dY;
+	cx[2] = (cxB[2] > 0) ? (z1 - X_at_1b(Z, cxB[2])) / dZ : (z1 + X_at_1b(Z, 1 - cxB[2])) / dZ;
+
+	if (d_validate_interp6_bounds(ex, cxB, cxT)) {
+#if GPU_DEBUG_PRINT
+		printf("error in decide3d\n");
+		printf("cxB: %d %d %d, cxT: %d %d %d, ex: %d %d %d\n",
+		       cxB[0], cxB[1], cxB[2], cxT[0], cxT[1], cxT[2], ex[0], ex[1], ex[2]);
+		printf("global_interp position: %f %f %f\n", x1, y1, z1);
+#endif
+		f_int[0] = NAN;
+		gpu_stop();
+		return;
+	}
+	d_polin3_streaming6_legacy(x1a, ex, f, cxB, cx, SoA, f_int[0]);
+}
+
 __device__ double d_symmetry_bd_1b(
 	int ord, const int extc[3], const double* func,
 	int i1b, int j1b, int k1b, const double SoA[3]
@@ -430,12 +539,19 @@ __global__ void global_interp_kernel(
 
     // 调用你们原有的设备端插值函数
     double val = 0.0;
-    global_interp_device(
-        ex, d_X_arr[0], d_X_arr[1], d_X_arr[2],
-        d_field, &val,
-        px, py, pz,
-        ordn, SoA_arr, Symmetry
-    );
+    if (ordn == MAX_ORDN) {
+        global_interp6_streaming_device(
+            ex, d_X_arr[0], d_X_arr[1], d_X_arr[2],
+            d_field, &val, px, py, pz, SoA_arr, Symmetry
+        );
+    } else {
+        global_interp_device(
+            ex, d_X_arr[0], d_X_arr[1], d_X_arr[2],
+            d_field, &val,
+            px, py, pz,
+            ordn, SoA_arr, Symmetry
+        );
+    }
 
     // 将结果原子累加到对应位置（处理 Ghost Zone 多个 Block 重叠的情况）
     atomicAdd(&d_shellf[j * num_var + var_idx], val);
