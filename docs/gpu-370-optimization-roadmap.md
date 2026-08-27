@@ -2,7 +2,48 @@
 
 > 更新日期：2026-08-27
 > 正式目标：A100 MIG 1g.10gb、16 CPU、单 MPI rank、`t=100`，`This Program Cost <= 370s`
-> 当前基线：commit `6ab1f2c`，`t=5` 三次均值 `74.633372 +/- 0.093387s`
+> 原始基线：commit `6ab1f2c`，`t=5` 三次均值 `74.633372 +/- 0.093387s`
+> 最终候选：commit `0e4551a`，正式 `t=100` 三次均值 `361.511935 +/- 2.059365s`
+
+## 0. 执行结果：目标已达成
+
+本文后续章节保留了优化前的 profile 判断、Amdahl 预算和阶段止损线；本节记录按该路线
+实际执行后的最终状态。最终候选为 clean commit `0e4551a0ad6d0d1994018acb23868a641bf2a07b`，
+正式 artifact 为 `profile/gpu-benchmark-20260827T152719Z-64/`。
+
+| 正式重复 | Total Evolve Time | This Program Cost | 完整 checker |
+|---:|---:|---:|---|
+| 1 | `331.528s` | `360.864865s` | PASS，trajectory RMS `0` |
+| 2 | `330.663s` | `359.853815s` | PASS，trajectory RMS `0` |
+| 3 | `333.419s` | `363.817126s` | PASS，trajectory RMS `0` |
+| 均值 | `331.870s` | `361.511935s` | 3/3 PASS |
+
+Program Cost 的样本标准差为 `2.059365s`，三次最慢值仍比 `370s` 低 `6.182874s`。
+checker 三次均匹配 `100/100` 个轨迹时刻和 `596` 个有效项，约束检查也全部通过。
+`timings.tsv` 中的 `outer_wall_seconds` 包含 benchmark wrapper 的额外开销，不是实验文档指定的
+正式指标；验收始终使用程序自己打印的 `This Program Cost`，没有用 kernel sum、短窗外推或
+删去慢点替代正式结果。
+
+实际落地路径如下：
+
+| 阶段 | 保留的实现 | 对应提交 |
+|---|---|---|
+| 点插值 | 单 rank 本地 BH fast path；固定六点 Neville 标量化；analysis 插值使用 GPU stream | `d861ef3`、`f0e1d91`、`11c6356` |
+| 主 RHS stencil | evolution、beta/Gamma、chi/lapse 的四阶导数改为 equatorial shared tile | `d4866f1`、`ebe5f5a`、`a624d51` |
+| AMR | 插值批处理、prolong tile、修正边界批量 copy | `66b560a`、`0878a0f`、`75543e3` |
+| 无用工作 | 跳过稍后必然被覆盖的 refined predictor constraints | `adeca02` |
+| RHS 数据流 | metric/A、chi/lapse、geometry/Ricci-A、beta/Gamma、trace/metric/A 融合 | `557d397`、`b6217ff`、`d4a05db`、`bcb1c39`、`0e4551a` |
+| 收尾融合 | fused beta stage 内复用 tile 计算 Gamma 导数；gauge source 折入 compact advection | `793768d`、`fae118c` |
+
+最终 `t=5` 三次筛选结果为 Program `45.658880 +/- 0.044580s`、Evolve 均值
+`16.9007s`；它只用于决定是否提交昂贵的正式运行。完整 `t=100` 三跑才是最终验收。
+
+执行中还实测并回退了无收益或负收益候选，包括 global interpolation 的额外 batch、
+advection padding/cross-tile/three-slab、以及把 Lap/trK 导数物化进 geometry scratch。
+这些结果与第 8 节的止损原则一致：即使 checker 通过，只要端到端没有稳定改善也不保留。
+
+整个最终路径仍使用原始网格、`t=100`、Courant factor、输出、四阶有限差分、RK4 和 FP64
+关键路径；没有预计算答案、降低精度、减少 RK stage、减少输出或改变物理问题。
 
 ## 结论先行
 
