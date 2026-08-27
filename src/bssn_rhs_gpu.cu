@@ -6,6 +6,7 @@
 #include "lopsidediff.h"
 #include "gpu_manager.h"
 #include "advection_compact_gpu.cuh"
+#include "hessian_compact_gpu.cuh"
 
 #include <cuda_runtime.h>
 #include <math.h>
@@ -1594,7 +1595,39 @@ void gpu_compute_rhs_bssn_launch( // launch kernel with device pointers
     // 1. Kernel 1: Derivatives & Connection Coefficients
     rhs_beta_gamma_prepare_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
     rhs_beta_gamma_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
-    rhs_evolution_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
+    if (symmetry == 1) {
+        CompactHessianFields hessian_fields{};
+        const double* hessian_inputs[COMPACT_HESSIAN_FIELDS] = {
+            d_dxx, d_dyy, d_dzz, d_gxy, d_gxz, d_gyz
+        };
+        double* hessian_outputs[COMPACT_HESSIAN_FIELDS] = {
+            d_Rxx, d_Ryy, d_Rzz, d_Rxy, d_Rxz, d_Ryz
+        };
+        const int hessian_x_parity[COMPACT_HESSIAN_FIELDS] = {
+            1, 1, 1, -1, -1, 1
+        };
+        const int hessian_y_parity[COMPACT_HESSIAN_FIELDS] = {
+            1, 1, 1, -1, 1, -1
+        };
+        const int hessian_z_parity[COMPACT_HESSIAN_FIELDS] = {
+            1, 1, 1, 1, -1, -1
+        };
+        for (int field = 0; field < COMPACT_HESSIAN_FIELDS; ++field) {
+            hessian_fields.input[field] = hessian_inputs[field];
+            hessian_fields.output[field] = hessian_outputs[field];
+            hessian_fields.parity_x[field] = hessian_x_parity[field];
+            hessian_fields.parity_y[field] = hessian_y_parity[field];
+            hessian_fields.parity_z[field] = hessian_z_parity[field];
+        }
+        launch_rhs_evolution_equatorial_compact(
+            stream, ex[0], ex[1], ex[2], d_X, d_Y, d_Z,
+            d_betax_rhs, d_betay_rhs, d_betaz_rhs,
+            d_dtSfx_rhs, d_dtSfy_rhs, d_dtSfz_rhs,
+            hessian_fields
+        );
+    } else {
+        rhs_evolution_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
+    }
     rhs_ricci_connection_diag_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
     rhs_ricci_connection_offdiag_kernel<<<grid, block, 0, stream>>>(RHS_LAUNCH_ARGS);
     // Source and advection mutate RHS arrays but are not consumed by constraints.
