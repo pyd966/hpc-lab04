@@ -250,8 +250,8 @@ __global__ void rhs_beta_gamma_kernel(RHS_KERNEL_PARAMS) {
 }
 
 // Equatorial fast path: keep the beta-Hessian producer values on chip until
-// the Gamma RHS consumer has used them. Gamma derivatives deliberately retain
-// the established point stencil in this first fused version.
+// the Gamma RHS consumer has used them, then reuse the tile for the three
+// Gamma first-derivative fields.
 __global__ void rhs_beta_gamma_equatorial_compact_kernel(RHS_KERNEL_PARAMS) {
     const int base_i = blockIdx.x * COMPACT_HESSIAN_BX;
     const int base_j = blockIdx.y * COMPACT_HESSIAN_BY;
@@ -281,7 +281,7 @@ __global__ void rhs_beta_gamma_equatorial_compact_kernel(RHS_KERNEL_PARAMS) {
     __shared__ double tile[COMPACT_HESSIAN_TILE_SIZE];
     __shared__ double prepared[9][
         COMPACT_HESSIAN_BX * COMPACT_HESSIAN_BY * COMPACT_HESSIAN_BZ];
-    __shared__ double scales[12];
+    __shared__ double scales[18];
     __shared__ int kmin_shared;
     if (tid == 0) {
         const double dx = X[1] - X[0];
@@ -299,6 +299,12 @@ __global__ void rhs_beta_gamma_equatorial_compact_kernel(RHS_KERNEL_PARAMS) {
         scales[9] = (1.0 / 144.0) / (dx * dy);
         scales[10] = (1.0 / 144.0) / (dx * dz);
         scales[11] = (1.0 / 144.0) / (dy * dz);
+        scales[12] = (1.0 / 12.0) / dx;
+        scales[13] = (1.0 / 12.0) / dy;
+        scales[14] = (1.0 / 12.0) / dz;
+        scales[15] = (1.0 / 2.0) / dx;
+        scales[16] = (1.0 / 2.0) / dy;
+        scales[17] = (1.0 / 2.0) / dz;
         kmin_shared = (fabs(Z[0]) < dz) ? -2 : 0;
     }
     __syncthreads();
@@ -429,27 +435,58 @@ __global__ void rhs_beta_gamma_equatorial_compact_kernel(RHS_KERNEL_PARAMS) {
         Gamy_rhs[idx] = val_Gamy_rhs;
         Gamz_rhs[idx] = val_Gamz_rhs;
         Azz_rhs[idx] = Gamza;
+    }
+    __syncthreads();
 
-        const int dims[3] = {ex0, ex1, ex2};
-        double dGamxx, dGamxy, dGamxz;
-        double dGamyx, dGamyy, dGamyz;
-        double dGamzx, dGamzy, dGamzz;
-        d_fderivs_point(dims, Gamx, &dGamxx, &dGamxy, &dGamxz,
-                        X, Y, Z, ANTI, SYM, SYM, symmetry, lev, i, j, k);
-        d_fderivs_point(dims, Gamy, &dGamyx, &dGamyy, &dGamyz,
-                        X, Y, Z, SYM, ANTI, SYM, symmetry, lev, i, j, k);
-        d_fderivs_point(dims, Gamz, &dGamzx, &dGamzy, &dGamzz,
-                        X, Y, Z, SYM, SYM, ANTI, symmetry, lev, i, j, k);
+#pragma unroll 1
+    for (int field_index = 0; field_index < 3; ++field_index) {
+        const double* field =
+            field_index == 0 ? Gamx : (field_index == 1 ? Gamy : Gamz);
+        const int parity_x = field_index == 0 ? -1 : 1;
+        const int parity_y = field_index == 1 ? -1 : 1;
+        const int parity_z = field_index == 2 ? -1 : 1;
+        for (int p = tid; p < COMPACT_HESSIAN_LOGICAL_SIZE; p += threads) {
+            const int tile_i = p % COMPACT_HESSIAN_SX;
+            const int q = p / COMPACT_HESSIAN_SX;
+            const int tile_j = q % COMPACT_HESSIAN_SY;
+            const int tile_k = q / COMPACT_HESSIAN_SY;
+            const int gi = base_i + tile_i - COMPACT_HESSIAN_RADIUS;
+            const int gj = base_j + tile_j - COMPACT_HESSIAN_RADIUS;
+            const int gk = base_k + tile_k - COMPACT_HESSIAN_RADIUS;
+            const int tile_index = compact_hessian_tile_index(
+                tile_i, tile_j, tile_k
+            );
+            tile[tile_index] = block_interior
+                ? field[gi + ex0 * (gj + ex1 * gk)]
+                : compact_hessian_symmetry_load(
+                    field, gi, gj, gk, ex0, ex1, ex2,
+                    parity_x, parity_y, parity_z
+                );
+        }
+        __syncthreads();
 
-        ham_Res[idx] = dGamxx;
-        movx_Res[idx] = dGamxy;
-        movy_Res[idx] = dGamxz;
-        movz_Res[idx] = dGamyx;
-        Gmx_Res[idx] = dGamyy;
-        Gmy_Res[idx] = dGamyz;
-        Gmz_Res[idx] = dGamzx;
-        Ayy_rhs[idx] = dGamzy;
-        Ayz_rhs[idx] = dGamzz;
+        if (valid) {
+            double fx, fy, fz;
+            compact_first_derivatives_from_tile(
+                tile, center_index, active, i, j, k,
+                ex0, ex1, ex2, kmin_shared, scales,
+                fx, fy, fz
+            );
+            if (field_index == 0) {
+                ham_Res[idx] = fx;
+                movx_Res[idx] = fy;
+                movy_Res[idx] = fz;
+            } else if (field_index == 1) {
+                movz_Res[idx] = fx;
+                Gmx_Res[idx] = fy;
+                Gmy_Res[idx] = fz;
+            } else {
+                Gmz_Res[idx] = fx;
+                Ayy_rhs[idx] = fy;
+                Ayz_rhs[idx] = fz;
+            }
+        }
+        if (field_index + 1 < 3) __syncthreads();
     }
 }
 
