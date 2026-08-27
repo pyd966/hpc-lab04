@@ -562,26 +562,100 @@ __global__ void prolong3_batch_kernel(
     int nvars,
     int Symmetry
 ) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int var = blockIdx.y;
-    int total = ni * nj * nk;
-    if (idx >= total || var >= nvars) return;
+    constexpr int BX = 8;
+    constexpr int BY = 8;
+    constexpr int BZ = 4;
+    constexpr int TX = 10;
+    constexpr int TY = 10;
+    constexpr int TZ = 8;
+    constexpr int PITCH = 11;
+    __shared__ double tile[TZ][TY][PITCH];
 
-    int k_local = idx / (ni * nj);
-    int rem     = idx % (ni * nj);
-    int j_local = rem / ni;
-    int i_local = rem % ni;
-    int i = i_start + i_local;
-    int j = j_start + j_local;
-    int k = k_start + k_local;
+    const int gx = (ni + BX - 1) / BX;
+    const int gy = (nj + BY - 1) / BY;
+    int spatial_block = blockIdx.x;
+    const int bx = spatial_block % gx;
+    spatial_block /= gx;
+    const int by = spatial_block % gy;
+    const int bz = spatial_block / gy;
+    const int var = blockIdx.y;
 
+    const int i_local = bx * BX + threadIdx.x;
+    const int j_local = by * BY + threadIdx.y;
+    const int k_local = bz * BZ + threadIdx.z;
+    const bool active = i_local < ni && j_local < nj && k_local < nk && var < nvars;
 
-    Prolong3BatchVar v = vars[var];
-    d_prolong3_precomputed(
-        i, j, k, lbc0, lbc1, lbc2, lbf0, lbf1, lbf2,
-        extc0, extc1, extc2, v.d_src,
-        extf0, extf1, extf2, v.d_dst, v.SoA
-    );
+    const int i0 = i_start + bx * BX;
+    const int j0 = j_start + by * BY;
+    const int k0 = k_start + bz * BZ;
+    const int ci0 = ((i0 + 1) + lbf0 - 1) / 2 - lbc0 + 1;
+    const int cj0 = ((j0 + 1) + lbf1 - 1) / 2 - lbc1 + 1;
+    const int ck0 = ((k0 + 1) + lbf2 - 1) / 2 - lbc2 + 1;
+    const int tile_i_lo = ci0 - 2;
+    const int tile_j_lo = cj0 - 2;
+    const int tile_k_lo = ck0 - 2;
+
+    const Prolong3BatchVar v = vars[var];
+    const int tid = threadIdx.x + BX * (threadIdx.y + BY * threadIdx.z);
+    #pragma unroll 1
+    for (int p = tid; p < TX * TY * TZ; p += BX * BY * BZ) {
+        const int lx = p % TX;
+        const int q = p / TX;
+        const int ly = q % TY;
+        const int lz = q / TY;
+        tile[lz][ly][lx] = d_symmetry_bd_scalar(
+            3, extc0, extc1, extc2, v.d_src,
+            tile_i_lo + lx, tile_j_lo + ly, tile_k_lo + lz, v.SoA);
+    }
+    __syncthreads();
+    if (!active) return;
+
+    const int i = i_start + i_local;
+    const int j = j_start + j_local;
+    const int k = k_start + k_local;
+    const int i1b = i + 1;
+    const int j1b = j + 1;
+    const int k1b = k + 1;
+    const int ii = i + lbf0;
+    const int jj = j + lbf1;
+    const int kk = k + lbf2;
+    const int cxI_i = (i1b + lbf0 - 1) / 2 - lbc0 + 1;
+    const int cxI_j = (j1b + lbf1 - 1) / 2 - lbc1 + 1;
+    const int cxI_k = (k1b + lbf2 - 1) / 2 - lbc2 + 1;
+    const bool k_even = ((kk / 2) * 2 == kk);
+    const bool j_even = ((jj / 2) * 2 == jj);
+    const bool i_even = ((ii / 2) * 2 == ii);
+    const int li = cxI_i - tile_i_lo;
+    const int lj = cxI_j - tile_j_lo;
+    const int lk = cxI_k - tile_k_lo;
+
+    double final_val = 0.0;
+    #pragma unroll 1
+    for (int n = 0; n < 6; ++n) {
+        double y_val = 0.0;
+        #pragma unroll 1
+        for (int m = 0; m < 6; ++m) {
+            double z_val = 0.0;
+            if (k_even) {
+                z_val += C_PROLONG[0] * tile[lk - 2][lj - 2 + m][li - 2 + n];
+                z_val += C_PROLONG[1] * tile[lk - 1][lj - 2 + m][li - 2 + n];
+                z_val += C_PROLONG[2] * tile[lk][lj - 2 + m][li - 2 + n];
+                z_val += C_PROLONG[3] * tile[lk + 1][lj - 2 + m][li - 2 + n];
+                z_val += C_PROLONG[4] * tile[lk + 2][lj - 2 + m][li - 2 + n];
+                z_val += C_PROLONG[5] * tile[lk + 3][lj - 2 + m][li - 2 + n];
+            } else {
+                z_val += C_PROLONG[5] * tile[lk - 2][lj - 2 + m][li - 2 + n];
+                z_val += C_PROLONG[4] * tile[lk - 1][lj - 2 + m][li - 2 + n];
+                z_val += C_PROLONG[3] * tile[lk][lj - 2 + m][li - 2 + n];
+                z_val += C_PROLONG[2] * tile[lk + 1][lj - 2 + m][li - 2 + n];
+                z_val += C_PROLONG[1] * tile[lk + 2][lj - 2 + m][li - 2 + n];
+                z_val += C_PROLONG[0] * tile[lk + 3][lj - 2 + m][li - 2 + n];
+            }
+            y_val += C_PROLONG[j_even ? m : 5 - m] * z_val;
+        }
+        final_val += C_PROLONG[i_even ? n : 5 - n] * y_val;
+    }
+    v.d_dst[k * (extf0 * extf1) + j * extf0 + i] = final_val;
 }
 
 __global__ void restrict3_batch_kernel(
@@ -781,10 +855,12 @@ void gpu_prolong3_batch_launch(
     int nk = ends[2] - starts[2] + 1;
     if (ni <= 0 || nj <= 0 || nk <= 0) return;
 
-    int block = 256;
-    int grid = (ni * nj * nk + block - 1) / block;
-    dim3 blocks(grid, nvars, 1);
-    prolong3_batch_kernel<<<blocks, block, 0, stream>>>(
+    dim3 threads(8, 8, 4);
+    int gx = (ni + threads.x - 1) / threads.x;
+    int gy = (nj + threads.y - 1) / threads.y;
+    int gz = (nk + threads.z - 1) / threads.z;
+    dim3 blocks(gx * gy * gz, nvars, 1);
+    prolong3_batch_kernel<<<blocks, threads, 0, stream>>>(
         ni, nj, nk, starts[0], starts[1], starts[2],
         llbc[0], llbc[1], llbc[2], uubc[0], uubc[1], uubc[2],
         extc[0], extc[1], extc[2],
