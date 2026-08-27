@@ -127,6 +127,7 @@ void bssn_class::Step_GPU(int lev, int YN) {
 					Symmetry, lev, ndeps, pre
 				);
 
+				SommerfeldCorrectBatch boundary_fields{};
 				MyList<var> *varl0 = StateList, *varl = SynchList_pre, *varlrhs = RHSList; // we do not check the correspondence here
 				while (varl0) {
 					if (lev == 0) { // sommerfeld indeed
@@ -145,21 +146,34 @@ void bssn_class::Step_GPU(int lev, int YN) {
 						cg->shape, dT_lev, 
 						cg->d_fgfs[varl0->data->sgfn], cg->d_fgfs[varl->data->sgfn], cg->d_fgfs[varlrhs->data->sgfn], iter_count
 					);
-					if (lev > 0) {// fix BD point
-						gpu_sommerfeld_rout_launch(
-							cg->stream,
-							cg->shape,
-							cg->d_X[0], cg->d_X[1], cg->d_X[2],
-							Pp->data->bbox[0], Pp->data->bbox[1], Pp->data->bbox[2], Pp->data->bbox[3], Pp->data->bbox[4], Pp->data->bbox[5],
-							dT_lev, cg->d_fgfs[phi0->sgfn],
-							cg->d_fgfs[Lap0->sgfn], cg->d_fgfs[varl0->data->sgfn], cg->d_fgfs[varl->data->sgfn], varl0->data->SoA,
-							Symmetry, cor
-						);
+					if (lev > 0) {// fix BD point after all independent RK variables
+						const int field = boundary_fields.count++;
+						boundary_fields.source[field] = cg->d_fgfs[varl0->data->sgfn];
+						boundary_fields.destination[field] = cg->d_fgfs[varl->data->sgfn];
+						if (boundary_fields.count == SOMMERFELD_CORRECT_BATCH_MAX) {
+							gpu_sommerfeld_correct_batch_launch(
+								cg->stream, cg->shape,
+								cg->d_X[0], cg->d_X[1], cg->d_X[2],
+								Pp->data->bbox[0], Pp->data->bbox[1], Pp->data->bbox[2],
+								Pp->data->bbox[3], Pp->data->bbox[4], Pp->data->bbox[5],
+								boundary_fields, Symmetry
+							);
+							boundary_fields.count = 0;
+						}
 					}
 
 					varl0 = varl0->next;
 					varl = varl->next;
 					varlrhs = varlrhs->next;
+				}
+				if (lev > 0 && boundary_fields.count > 0) {
+					gpu_sommerfeld_correct_batch_launch(
+						cg->stream, cg->shape,
+						cg->d_X[0], cg->d_X[1], cg->d_X[2],
+						Pp->data->bbox[0], Pp->data->bbox[1], Pp->data->bbox[2],
+						Pp->data->bbox[3], Pp->data->bbox[4], Pp->data->bbox[5],
+						boundary_fields, Symmetry
+					);
 				}
 				gpu_lowerboundset_launch(cg->stream, cg->shape, cg->d_fgfs[phi->sgfn], chitiny);
 			}
@@ -243,6 +257,7 @@ void bssn_class::Step_GPU(int lev, int YN) {
 						Symmetry, lev, ndeps, cor
 					);
 
+					SommerfeldCorrectBatch boundary_fields{};
 					MyList<var> *varl0 = StateList, *varl = SynchList_pre, *varl1 = SynchList_cor, *varlrhs = RHSList; // we do not check the correspondence here
 					while (varl0) {
 						if (lev == 0) { // sommerfeld indeed
@@ -258,20 +273,35 @@ void bssn_class::Step_GPU(int lev, int YN) {
 							cg->stream, cg->shape, dT_lev, 
 							cg->d_fgfs[varl0->data->sgfn], cg->d_fgfs[varl1->data->sgfn], cg->d_fgfs[varlrhs->data->sgfn], iter_count
 						);
-						if (lev > 0) { // fix BD point
-							gpu_sommerfeld_rout_launch(
-								cg->stream, cg->shape, cg->d_X[0], cg->d_X[1], cg->d_X[2],
-								Pp->data->bbox[0], Pp->data->bbox[1], Pp->data->bbox[2], Pp->data->bbox[3], Pp->data->bbox[4], Pp->data->bbox[5],
-								dT_lev, cg->d_fgfs[phi0->sgfn],
-								cg->d_fgfs[Lap0->sgfn], cg->d_fgfs[varl0->data->sgfn], cg->d_fgfs[varl1->data->sgfn], varl0->data->SoA,
-								Symmetry, cor
-							);
+						if (lev > 0) { // fix BD point after all independent RK variables
+							const int field = boundary_fields.count++;
+							boundary_fields.source[field] = cg->d_fgfs[varl0->data->sgfn];
+							boundary_fields.destination[field] = cg->d_fgfs[varl1->data->sgfn];
+							if (boundary_fields.count == SOMMERFELD_CORRECT_BATCH_MAX) {
+								gpu_sommerfeld_correct_batch_launch(
+									cg->stream, cg->shape,
+									cg->d_X[0], cg->d_X[1], cg->d_X[2],
+									Pp->data->bbox[0], Pp->data->bbox[1], Pp->data->bbox[2],
+									Pp->data->bbox[3], Pp->data->bbox[4], Pp->data->bbox[5],
+									boundary_fields, Symmetry
+								);
+								boundary_fields.count = 0;
+							}
 						}
 
 						varl0 = varl0->next;
 						varl = varl->next;
 						varl1 = varl1->next;
 						varlrhs = varlrhs->next;
+					}
+					if (lev > 0 && boundary_fields.count > 0) {
+						gpu_sommerfeld_correct_batch_launch(
+							cg->stream, cg->shape,
+							cg->d_X[0], cg->d_X[1], cg->d_X[2],
+							Pp->data->bbox[0], Pp->data->bbox[1], Pp->data->bbox[2],
+							Pp->data->bbox[3], Pp->data->bbox[4], Pp->data->bbox[5],
+							boundary_fields, Symmetry
+						);
 					}
 
 					gpu_lowerboundset_launch(cg->stream, cg->shape, cg->d_fgfs[phi1->sgfn], chitiny);

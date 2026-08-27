@@ -52,6 +52,15 @@ extern "C"
 
 #ifdef USE_GPU
 #include <cuda_runtime.h>
+
+constexpr int SOMMERFELD_CORRECT_BATCH_MAX = 32;
+
+struct SommerfeldCorrectBatch {
+    const double* source[SOMMERFELD_CORRECT_BATCH_MAX];
+    double* destination[SOMMERFELD_CORRECT_BATCH_MAX];
+    int count;
+};
+
 void gpu_sommerfeld_rout_launch(
     cudaStream_t &stream,
     int ex[3],
@@ -61,6 +70,16 @@ void gpu_sommerfeld_rout_launch(
     double dT, const double* d_chi0, const double* d_Lap0,
     const double* d_f0, double* d_f, const double SoA[3],
     int Symmetry, int precor
+);
+
+void gpu_sommerfeld_correct_batch_launch(
+    cudaStream_t &stream,
+    int ex[3],
+    const double* d_X, const double* d_Y, const double* d_Z,
+    double xmin, double ymin, double zmin,
+    double xmax, double ymax, double zmax,
+    const SommerfeldCorrectBatch& fields,
+    int Symmetry
 );
 
 void gpu_sommerfeld_routbam_launch(

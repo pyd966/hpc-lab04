@@ -140,6 +140,33 @@ __global__ void sommerfeld_rout_kernel(
     }
 }
 
+__global__ void sommerfeld_correct_batch_kernel(
+    int ex0, int ex1, int ex2,
+    const double* X, const double* Y, const double* Z,
+    double xmin, double ymin, double zmin,
+    double xmax, double ymax, double zmax,
+    SommerfeldCorrectBatch fields,
+    int Symmetry
+) {
+    const int i0 = blockIdx.x * blockDim.x + threadIdx.x;
+    const int j0 = blockIdx.y * blockDim.y + threadIdx.y;
+    const int k0 = blockIdx.z * blockDim.z + threadIdx.z;
+    if (i0 >= ex0 || j0 >= ex1 || k0 >= ex2) return;
+
+    if (!is_sommerfeld_boundary(
+            i0 + 1, j0 + 1, k0 + 1,
+            ex0, ex1, ex2, X, Y, Z,
+            xmin, ymin, zmin, xmax, ymax, zmax, Symmetry)) {
+        return;
+    }
+
+    const int idx = (k0 * ex1 + j0) * ex0 + i0;
+#pragma unroll 1
+    for (int field = 0; field < fields.count; ++field) {
+        fields.destination[field][idx] = fields.source[field][idx];
+    }
+}
+
 __global__ void sommerfeld_routbam_kernel(
     int ex0, int ex1, int ex2,
     const double* X, const double* Y, const double* Z,
@@ -301,6 +328,29 @@ void gpu_sommerfeld_rout_launch(
     sommerfeld_rout_kernel<<<grid, block, 0, stream>>>(
         ex[0], ex[1], ex[2], d_X, d_Y, d_Z, xmin, ymin, zmin, xmax, ymax, zmax,
         dT, d_chi0, d_Lap0, d_f0, d_f, SoA[0], SoA[1], SoA[2], Symmetry, precor
+    );
+}
+
+void gpu_sommerfeld_correct_batch_launch(
+    cudaStream_t &stream,
+    int ex[3],
+    const double* d_X, const double* d_Y, const double* d_Z,
+    double xmin, double ymin, double zmin,
+    double xmax, double ymax, double zmax,
+    const SommerfeldCorrectBatch& fields,
+    int Symmetry
+) {
+    if (fields.count <= 0) return;
+
+    const dim3 block(8, 8, 4);
+    const dim3 grid(
+        (ex[0] + block.x - 1) / block.x,
+        (ex[1] + block.y - 1) / block.y,
+        (ex[2] + block.z - 1) / block.z
+    );
+    sommerfeld_correct_batch_kernel<<<grid, block, 0, stream>>>(
+        ex[0], ex[1], ex[2], d_X, d_Y, d_Z,
+        xmin, ymin, zmin, xmax, ymax, zmax, fields, Symmetry
     );
 }
 
