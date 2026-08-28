@@ -4,6 +4,11 @@
 #include "prolongrestrict.h"
 #include "misc.h"
 #include "parameters.h"
+#include <cerrno>
+#include <climits>
+#include <cstdlib>
+#include <vector>
+
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -129,13 +134,32 @@ MyList<Block> *Parallel::distribute(
     MyList<Patch> *PatchLIST, int cpusize, int ingfsi, int fngfsi,
     bool periodic, int nodes
 ) {
+    const bool nodes_supplied = nodes != 0;
     if (nodes == 0)
         nodes = cpusize;
 
-#ifdef _OPENMP
-    // Keep MPI ownership unchanged, but create enough independent blocks for
-    // the OpenMP workers on each rank to receive useful work.
-    nodes = Mymax(nodes, cpusize * omp_get_max_threads());
+#ifdef AMSS_OMP_ONLY
+    // In the single-process build, Blocks are OpenMP work units. Keep the
+    // historical thread-count default, but allow performance experiments to
+    // request a different decomposition without changing the numerical input.
+    const char *target_text = std::getenv("AMSS_OMP_BLOCK_TARGET");
+    if (!nodes_supplied && target_text && *target_text)
+    {
+        char *end = 0;
+        errno = 0;
+        long target = std::strtol(target_text, &end, 10);
+        if (errno || end == target_text || *end || target < 1 || target > INT_MAX)
+        {
+            cerr << "AMSS_OMP_BLOCK_TARGET must be an integer in [1, "
+                 << INT_MAX << "]: " << target_text << endl;
+            MPI_Abort(MPI_COMM_WORLD, 1);
+        }
+        nodes = static_cast<int>(target);
+    }
+    else if (!nodes_supplied)
+    {
+        nodes = Mymax(nodes, omp_get_max_threads());
+    }
 #endif
 
     if (dim != 3)
@@ -283,6 +307,11 @@ MyList<Block> *Parallel::distribute(
         if (myrank == 0)
             cout << "Parallel::distribute CAUSTION: level#" << lev << " uses essencially " << reacpu << " processors vs " << nodes << " nodes run, your scientific computation scale is not as large as you estimate." << endl;
     }
+
+#ifdef AMSS_OMP_ONLY
+    cout << "OpenMP block decomposition: level#" << lev
+         << " target=" << nodes << " actual=" << reacpu << endl;
+#endif
 
     return BlL;
 }
@@ -2519,6 +2548,761 @@ int Parallel::data_packermix(double *data, MyList<Parallel::gridseg> *src, MyLis
     return size_out;
 }
 
+#ifdef AMSS_OMP_ONLY
+namespace
+{
+struct OmpLocalTransferOp
+{
+    Parallel::gridseg *src;
+    Parallel::gridseg *dst;
+    var *src_var;
+    var *dst_var;
+    size_t offset;
+    size_t size;
+};
+
+bool omp_transfer_target_regions_overlap(
+    const Parallel::gridseg &a, const Parallel::gridseg &b)
+{
+    for (int direction = 0; direction < dim; ++direction)
+    {
+        const double spacing =
+            (a.Bg->bbox[dim + direction] - a.Bg->bbox[direction]) /
+            a.Bg->shape[direction];
+        const int a_lo = static_cast<int>(
+            (a.llb[direction] - a.Bg->bbox[direction]) / spacing);
+        const int a_hi = a.Bg->shape[direction] - 1 -
+            static_cast<int>((a.Bg->bbox[dim + direction] -
+                              a.uub[direction]) / spacing);
+        const int b_lo = static_cast<int>(
+            (b.llb[direction] - b.Bg->bbox[direction]) / spacing);
+        const int b_hi = b.Bg->shape[direction] - 1 -
+            static_cast<int>((b.Bg->bbox[dim + direction] -
+                              b.uub[direction]) / spacing);
+        if (a_hi < b_lo || b_hi < a_lo)
+            return false;
+    }
+    return true;
+}
+
+vector<double> &omp_transfer_workspace()
+{
+    static vector<double> workspace;
+    return workspace;
+}
+
+void omp_local_transfer(MyList<Parallel::gridseg> *src, MyList<Parallel::gridseg> *dst,
+                        MyList<var> *VarList1, MyList<var> *VarList2,
+                        int Symmetry, bool mixed)
+{
+    if (!src || !dst)
+        return;
+
+    vector<var *> src_vars;
+    vector<var *> dst_vars;
+    MyList<var> *varls = VarList1;
+    MyList<var> *varld = VarList2;
+    while (varls && varld)
+    {
+        src_vars.push_back(varls->data);
+        dst_vars.push_back(varld->data);
+        varls = varls->next;
+        varld = varld->next;
+    }
+    if (varls || varld)
+    {
+        cout << "omp_local_transfer: variable lists do not match." << endl;
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+
+    const int type = src->data->Bg->lev == dst->data->Bg->lev ? 1 :
+                     (src->data->Bg->lev > dst->data->Bg->lev ? 2 : 3);
+    if (mixed && type != 3)
+    {
+        cout << "omp_local_transfer: mixed transfer requires prolongation." << endl;
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+
+    vector<OmpLocalTransferOp> ops;
+    size_t total_size = 0;
+    while (src && dst)
+    {
+        for (size_t var_index = 0; var_index < src_vars.size(); ++var_index)
+        {
+            OmpLocalTransferOp op;
+            op.src = src->data;
+            op.dst = dst->data;
+            op.src_var = src_vars[var_index];
+            op.dst_var = dst_vars[var_index];
+            op.offset = total_size;
+            if (mixed)
+                op.size = static_cast<size_t>(op.src->shape[0] + 2 * ghost_width) *
+                          static_cast<size_t>(op.src->shape[1] + 2 * ghost_width) *
+                          static_cast<size_t>(op.src->shape[2] + 2 * ghost_width);
+            else
+                op.size = static_cast<size_t>(op.dst->shape[0]) *
+                          static_cast<size_t>(op.dst->shape[1]) *
+                          static_cast<size_t>(op.dst->shape[2]);
+            total_size += op.size;
+            ops.push_back(op);
+        }
+        src = src->next;
+        dst = dst->next;
+    }
+
+    if (total_size == 0)
+        return;
+
+    int DIM = dim;
+
+#ifdef AMSS_OMP_DIRECT_AMR_TRANSFER
+    if (!mixed && type != 1)
+    {
+        // Source and destination levels use different Block allocations. Keep
+        // each target array's segment order serial, but run independent
+        // target arrays as separate OpenMP tasks.
+        map<double *, size_t> group_map;
+        vector<vector<size_t> > groups;
+        for (size_t op_index = 0; op_index < ops.size(); ++op_index)
+        {
+            OmpLocalTransferOp &op = ops[op_index];
+            double *target = op.dst->Bg->fgfs[op.dst_var->sgfn];
+            map<double *, size_t>::iterator found = group_map.find(target);
+            size_t group_index;
+            if (found == group_map.end())
+            {
+                group_index = groups.size();
+                group_map[target] = group_index;
+                groups.push_back(vector<size_t>());
+            }
+            else
+                group_index = found->second;
+            groups[group_index].push_back(op_index);
+        }
+
+        vector<vector<size_t> > tasks;
+#ifdef AMSS_ENABLE_OMP_DIRECT_AMR_SPLIT
+        for (size_t group_index = 0; group_index < groups.size(); ++group_index)
+        {
+            vector<size_t> &group = groups[group_index];
+            bool overlap = false;
+            for (size_t i = 0; i < group.size() && !overlap; ++i)
+                for (size_t j = 0; j < i; ++j)
+                    if (omp_transfer_target_regions_overlap(
+                            *ops[group[i]].dst, *ops[group[j]].dst))
+                    {
+                        overlap = true;
+                        break;
+                    }
+            if (overlap)
+                tasks.push_back(group);
+            else
+                for (size_t i = 0; i < group.size(); ++i)
+                    tasks.push_back(vector<size_t>(1, group[i]));
+        }
+#else
+        tasks.swap(groups);
+#endif
+
+#pragma omp parallel if (tasks.size() > 1)
+        {
+#pragma omp for schedule(dynamic, 1)
+            for (int group_index = 0;
+                 group_index < static_cast<int>(tasks.size()); ++group_index)
+            {
+                vector<size_t> &group = tasks[group_index];
+                for (size_t member = 0; member < group.size(); ++member)
+                {
+                    OmpLocalTransferOp &op = ops[group[member]];
+                    double *target =
+                        op.dst->Bg->fgfs[op.dst_var->sgfn];
+                    if (type == 2)
+                    {
+                        f_restrict3(
+                            DIM, op.dst->Bg->bbox,
+                            op.dst->Bg->bbox + dim, op.dst->Bg->shape, target,
+                            op.src->Bg->bbox, op.src->Bg->bbox + dim,
+                            op.src->Bg->shape,
+                            op.src->Bg->fgfs[op.src_var->sgfn],
+                            op.dst->llb, op.dst->uub, op.src_var->SoA,
+                            Symmetry);
+                    }
+                    else
+                    {
+                        f_prolong3(
+                            DIM, op.src->Bg->bbox,
+                            op.src->Bg->bbox + dim, op.src->Bg->shape,
+                            op.src->Bg->fgfs[op.src_var->sgfn],
+                            op.dst->Bg->bbox,
+                            op.dst->Bg->bbox + dim, op.dst->Bg->shape,
+                            target, op.dst->llb, op.dst->uub,
+                            op.src_var->SoA, Symmetry);
+                    }
+                }
+            }
+        }
+#ifdef AMSS_OMP_DIRECT_AMR_TRANSFER
+        static unsigned long direct_transfer_diagnostics = 0;
+        if (direct_transfer_diagnostics < 64)
+            cout << "OMP_AMR_DIRECT type=" << type
+                 << " ops=" << ops.size()
+                 << " groups=" << tasks.size() << endl;
+        ++direct_transfer_diagnostics;
+#endif
+        return;
+    }
+#endif
+
+    // The OpenMP-only control path enters transfers sequentially at
+    // synchronization boundaries. Reuse the largest packed workspace seen so
+    // far instead of allocating and freeing it for every RK/AMR transfer.
+    vector<double> &data_workspace = omp_transfer_workspace();
+    if (data_workspace.size() < total_size)
+        data_workspace.resize(total_size);
+    double *data = data_workspace.data();
+
+    // Preserve the MPI path's pack-before-unpack ordering. Packing only reads
+    // grid data, so individual segment/variable operations are independent.
+    // One team handles both phases; the implicit barrier between the two omp
+    // for directives prevents UNPACK from overwriting a source before PACK
+    // has finished reading it.
+    #pragma omp parallel if (ops.size() > 1)
+    {
+    #pragma omp for schedule(dynamic, 1)
+    for (int op_index = 0; op_index < static_cast<int>(ops.size()); ++op_index)
+    {
+        OmpLocalTransferOp &op = ops[op_index];
+        double *packed = data + op.offset;
+        if (mixed)
+        {
+            f_prolongcopy3(DIM, op.src->Bg->bbox, op.src->Bg->bbox + dim,
+                           op.src->Bg->shape, op.src->Bg->fgfs[op.src_var->sgfn],
+                           op.dst->llb, op.dst->uub, op.src->shape, packed,
+                           op.src->llb, op.src->uub, op.src_var->SoA, Symmetry);
+        }
+        else if (type == 1)
+        {
+            f_copy(DIM, op.dst->llb, op.dst->uub, op.dst->shape, packed,
+                   op.src->Bg->bbox, op.src->Bg->bbox + dim, op.src->Bg->shape,
+                   op.src->Bg->fgfs[op.src_var->sgfn], op.dst->llb, op.dst->uub);
+        }
+        else if (type == 2)
+        {
+            f_restrict3(DIM, op.dst->llb, op.dst->uub, op.dst->shape, packed,
+                        op.src->Bg->bbox, op.src->Bg->bbox + dim, op.src->Bg->shape,
+                        op.src->Bg->fgfs[op.src_var->sgfn], op.dst->llb, op.dst->uub,
+                        op.src_var->SoA, Symmetry);
+        }
+        else
+        {
+            f_prolong3(DIM, op.src->Bg->bbox, op.src->Bg->bbox + dim,
+                       op.src->Bg->shape, op.src->Bg->fgfs[op.src_var->sgfn],
+                       op.dst->llb, op.dst->uub, op.dst->shape, packed,
+                       op.dst->llb, op.dst->uub, op.src_var->SoA, Symmetry);
+        }
+    }
+
+    // Different variables own different arrays. Keep segment writes for one
+    // variable ordered in case two boundary segments touch the same point.
+    #pragma omp for schedule(static)
+    for (int var_index = 0; var_index < static_cast<int>(src_vars.size()); ++var_index)
+    {
+        for (size_t op_index = static_cast<size_t>(var_index);
+             op_index < ops.size(); op_index += src_vars.size())
+        {
+            OmpLocalTransferOp &op = ops[op_index];
+            double *packed = data + op.offset;
+            if (mixed)
+            {
+                f_prolongmix3(DIM, op.dst->Bg->bbox, op.dst->Bg->bbox + dim,
+                              op.dst->Bg->shape, op.dst->Bg->fgfs[op.dst_var->sgfn],
+                              op.src->llb, op.src->uub, op.src->shape, packed,
+                              op.dst->llb, op.dst->uub, op.src_var->SoA, Symmetry,
+                              op.dst->illb, op.dst->iuub);
+            }
+            else
+            {
+                f_copy(DIM, op.dst->Bg->bbox, op.dst->Bg->bbox + dim,
+                       op.dst->Bg->shape, op.dst->Bg->fgfs[op.dst_var->sgfn],
+                       op.dst->llb, op.dst->uub, op.dst->shape, packed,
+                       op.dst->llb, op.dst->uub);
+            }
+        }
+    }
+    }
+}
+
+struct OmpCachedSyncTransfer
+{
+    vector<var *> variables;
+    vector<OmpLocalTransferOp> ops;
+    size_t total_size;
+    int type;
+    bool direct_safe;
+
+    OmpCachedSyncTransfer() : total_size(0), type(0), direct_safe(false) {}
+};
+
+
+struct OmpSyncIndexBox
+{
+    int lo[dim];
+    int hi[dim];
+};
+
+bool omp_sync_copy_box(const Parallel::gridseg &segment,
+                       const double *llb, const double *uub,
+                       OmpSyncIndexBox &box)
+{
+    for (int direction = 0; direction < dim; ++direction)
+    {
+        const double spacing =
+            (segment.Bg->bbox[dim + direction] - segment.Bg->bbox[direction]) /
+            segment.Bg->shape[direction];
+        box.lo[direction] = static_cast<int>(
+            (llb[direction] - segment.Bg->bbox[direction]) / spacing);
+        box.hi[direction] = segment.Bg->shape[direction] - 1 -
+            static_cast<int>((segment.Bg->bbox[dim + direction] -
+                              uub[direction]) / spacing);
+        if (box.lo[direction] < 0 ||
+            box.hi[direction] >= segment.Bg->shape[direction] ||
+            box.lo[direction] > box.hi[direction])
+            return false;
+    }
+    return true;
+}
+
+bool omp_sync_boxes_overlap(const OmpSyncIndexBox &a,
+                            const OmpSyncIndexBox &b)
+{
+    for (int direction = 0; direction < dim; ++direction)
+        if (a.hi[direction] < b.lo[direction] ||
+            b.hi[direction] < a.lo[direction])
+            return false;
+    return true;
+}
+
+struct OmpSyncCopyRegion
+{
+    const double *source;
+    const double *target;
+    OmpSyncIndexBox source_box;
+    OmpSyncIndexBox target_box;
+};
+
+bool omp_sync_direct_copy_safe(const vector<OmpLocalTransferOp> &ops)
+{
+    if (ops.empty())
+        return false;
+
+    // Compare actual rectangles used by f_copy: direct writes may not alter
+    // another source read or race with another transfer writing target cells.
+    vector<OmpSyncCopyRegion> regions(ops.size());
+    for (size_t i = 0; i < ops.size(); ++i)
+    {
+        const OmpLocalTransferOp &op = ops[i];
+        OmpSyncCopyRegion &region = regions[i];
+        region.source = op.src->Bg->fgfs[op.src_var->sgfn];
+        region.target = op.dst->Bg->fgfs[op.dst_var->sgfn];
+        if (!region.source || !region.target ||
+            !omp_sync_copy_box(*op.src, op.dst->llb, op.dst->uub,
+                               region.source_box) ||
+            !omp_sync_copy_box(*op.dst, op.dst->llb, op.dst->uub,
+                               region.target_box))
+            return false;
+    }
+
+    for (size_t i = 0; i < regions.size(); ++i)
+    {
+        const OmpSyncCopyRegion &current = regions[i];
+        if (current.source == current.target &&
+            omp_sync_boxes_overlap(current.source_box, current.target_box))
+            return false;
+        for (size_t j = 0; j < i; ++j)
+        {
+            const OmpSyncCopyRegion &previous = regions[j];
+            if (current.target == previous.target &&
+                omp_sync_boxes_overlap(current.target_box,
+                                       previous.target_box))
+                return false;
+            if (current.target == previous.source &&
+                omp_sync_boxes_overlap(current.target_box,
+                                       previous.source_box))
+                return false;
+            if (previous.target == current.source &&
+                omp_sync_boxes_overlap(previous.target_box,
+                                       current.source_box))
+                return false;
+        }
+    }
+
+    return true;
+}
+
+struct OmpSyncGeometry
+{
+    MyList<Parallel::gridseg> *dst;
+    MyList<Parallel::gridseg> *src;
+    MyList<Parallel::gridseg> *transfer_src;
+    MyList<Parallel::gridseg> *transfer_dst;
+    vector<Patch *> patches;
+    vector<Block *> blocks;
+    vector<double> geometry;
+    vector<OmpCachedSyncTransfer *> variable_plans;
+
+    OmpSyncGeometry()
+        : dst(0), src(0), transfer_src(0), transfer_dst(0) {}
+
+    ~OmpSyncGeometry()
+    {
+        for (size_t i = 0; i < variable_plans.size(); ++i)
+            delete variable_plans[i];
+        if (dst)
+            dst->destroyList();
+        if (src)
+            src->destroyList();
+        if (transfer_src)
+            transfer_src->destroyList();
+        if (transfer_dst)
+            transfer_dst->destroyList();
+    }
+};
+
+struct OmpSyncCache
+{
+    map<Patch *, OmpSyncGeometry *> patch_plans;
+    map<MyList<Patch> *, OmpSyncGeometry *> list_plans;
+
+    ~OmpSyncCache()
+    {
+        for (map<Patch *, OmpSyncGeometry *>::iterator it =
+                 patch_plans.begin(); it != patch_plans.end(); ++it)
+            delete it->second;
+        for (map<MyList<Patch> *, OmpSyncGeometry *>::iterator it =
+                 list_plans.begin(); it != list_plans.end(); ++it)
+            delete it->second;
+    }
+};
+
+OmpSyncCache &omp_sync_cache()
+{
+    static OmpSyncCache cache;
+    return cache;
+}
+
+void omp_collect_patch_signature(
+    MyList<Patch> *patch_list, vector<Patch *> &patches,
+    vector<Block *> &blocks, vector<double> &geometry)
+{
+    patches.clear();
+    blocks.clear();
+    geometry.clear();
+    while (patch_list)
+    {
+        Patch *patch = patch_list->data;
+        patches.push_back(patch);
+        for (int direction = 0; direction < dim; ++direction)
+        {
+            geometry.push_back(patch->bbox[direction]);
+            geometry.push_back(patch->bbox[dim + direction]);
+            geometry.push_back(static_cast<double>(patch->shape[direction]));
+            geometry.push_back(static_cast<double>(patch->lli[direction]));
+            geometry.push_back(static_cast<double>(patch->uui[direction]));
+        }
+        MyList<Block> *block = patch->blb;
+        while (block)
+        {
+            blocks.push_back(block->data);
+            for (int direction = 0; direction < dim; ++direction)
+            {
+                geometry.push_back(block->data->bbox[direction]);
+                geometry.push_back(block->data->bbox[dim + direction]);
+                geometry.push_back(
+                    static_cast<double>(block->data->shape[direction]));
+            }
+            if (block == patch->ble)
+                break;
+            block = block->next;
+        }
+        patch_list = patch_list->next;
+    }
+}
+
+bool omp_sync_geometry_matches(
+    const OmpSyncGeometry &geometry, MyList<Patch> *patch_list)
+{
+    size_t patch_index = 0;
+    size_t block_index = 0;
+    size_t value_index = 0;
+    while (patch_list)
+    {
+        Patch *patch = patch_list->data;
+        if (patch_index >= geometry.patches.size() ||
+            geometry.patches[patch_index++] != patch)
+            return false;
+        for (int direction = 0; direction < dim; ++direction)
+        {
+            const double values[5] = {
+                patch->bbox[direction], patch->bbox[dim + direction],
+                static_cast<double>(patch->shape[direction]),
+                static_cast<double>(patch->lli[direction]),
+                static_cast<double>(patch->uui[direction])};
+            for (int value = 0; value < 5; ++value)
+                if (value_index >= geometry.geometry.size() ||
+                    geometry.geometry[value_index++] != values[value])
+                    return false;
+        }
+
+        MyList<Block> *block = patch->blb;
+        while (block)
+        {
+            if (block_index >= geometry.blocks.size() ||
+                geometry.blocks[block_index++] != block->data)
+                return false;
+            for (int direction = 0; direction < dim; ++direction)
+            {
+                const double values[3] = {
+                    block->data->bbox[direction],
+                    block->data->bbox[dim + direction],
+                    static_cast<double>(block->data->shape[direction])};
+                for (int value = 0; value < 3; ++value)
+                    if (value_index >= geometry.geometry.size() ||
+                        geometry.geometry[value_index++] != values[value])
+                        return false;
+            }
+            if (block == patch->ble)
+                break;
+            block = block->next;
+        }
+        patch_list = patch_list->next;
+    }
+    return patch_index == geometry.patches.size() &&
+           block_index == geometry.blocks.size() &&
+           value_index == geometry.geometry.size();
+}
+
+bool omp_sync_variables_match(
+    const OmpCachedSyncTransfer &plan, MyList<var> *variables)
+{
+    size_t index = 0;
+    while (variables)
+    {
+        if (index >= plan.variables.size() ||
+            plan.variables[index] != variables->data)
+            return false;
+        ++index;
+        variables = variables->next;
+    }
+    return index == plan.variables.size();
+}
+
+OmpCachedSyncTransfer *omp_build_cached_sync_transfer(
+    OmpSyncGeometry &geometry, MyList<var> *variables)
+{
+    OmpCachedSyncTransfer *plan = new OmpCachedSyncTransfer;
+    for (MyList<var> *node = variables; node; node = node->next)
+        plan->variables.push_back(node->data);
+
+    MyList<Parallel::gridseg> *src = geometry.transfer_src;
+    MyList<Parallel::gridseg> *dst = geometry.transfer_dst;
+    if (!src || !dst)
+        return plan;
+    plan->type = src->data->Bg->lev == dst->data->Bg->lev ? 1 :
+                 (src->data->Bg->lev > dst->data->Bg->lev ? 2 : 3);
+
+    while (src && dst)
+    {
+        for (size_t variable = 0;
+             variable < plan->variables.size(); ++variable)
+        {
+            OmpLocalTransferOp op;
+            op.src = src->data;
+            op.dst = dst->data;
+            op.src_var = plan->variables[variable];
+            op.dst_var = plan->variables[variable];
+            op.offset = plan->total_size;
+            op.size = static_cast<size_t>(op.dst->shape[0]) *
+                      static_cast<size_t>(op.dst->shape[1]) *
+                      static_cast<size_t>(op.dst->shape[2]);
+            plan->total_size += op.size;
+            plan->ops.push_back(op);
+        }
+        src = src->next;
+        dst = dst->next;
+    }
+    plan->direct_safe = plan->type == 1 &&
+                        omp_sync_direct_copy_safe(plan->ops);
+#ifdef AMSS_OMP_DIRECT_SYNC
+    cout << "OMP_SYNC_DIRECT type=" << plan->type
+         << " ops=" << plan->ops.size()
+         << " direct_safe=" << (plan->direct_safe ? 1 : 0) << endl;
+#endif
+    return plan;
+}
+
+OmpCachedSyncTransfer &omp_get_cached_sync_transfer(
+    OmpSyncGeometry &geometry, MyList<var> *variables)
+{
+    for (size_t i = 0; i < geometry.variable_plans.size(); ++i)
+        if (omp_sync_variables_match(
+                *geometry.variable_plans[i], variables))
+            return *geometry.variable_plans[i];
+
+    OmpCachedSyncTransfer *plan =
+        omp_build_cached_sync_transfer(geometry, variables);
+    geometry.variable_plans.push_back(plan);
+    return *plan;
+}
+
+void omp_execute_cached_sync(
+    OmpSyncGeometry &geometry, MyList<var> *variables, int Symmetry)
+{
+    OmpCachedSyncTransfer &plan =
+        omp_get_cached_sync_transfer(geometry, variables);
+    if (plan.total_size == 0)
+        return;
+
+    int DIM = dim;
+
+#ifdef AMSS_OMP_DIRECT_SYNC
+    if (plan.direct_safe)
+    {
+        // Same-level source and destination arrays are disjoint, so the
+        // pack-before-unpack staging buffer is unnecessary for this plan.
+#pragma omp parallel if (plan.ops.size() > 1)
+        {
+#pragma omp for schedule(dynamic, 1)
+            for (int op_index = 0;
+                 op_index < static_cast<int>(plan.ops.size()); ++op_index)
+            {
+                OmpLocalTransferOp &op = plan.ops[op_index];
+                f_copy(
+                    DIM, op.dst->Bg->bbox, op.dst->Bg->bbox + dim,
+                    op.dst->Bg->shape, op.dst->Bg->fgfs[op.dst_var->sgfn],
+                    op.src->Bg->bbox, op.src->Bg->bbox + dim,
+                    op.src->Bg->shape, op.src->Bg->fgfs[op.src_var->sgfn],
+                    op.dst->llb, op.dst->uub);
+            }
+        }
+        return;
+    }
+#endif
+
+    vector<double> &workspace = omp_transfer_workspace();
+    if (workspace.size() < plan.total_size)
+        workspace.resize(plan.total_size);
+    double *data = workspace.data();
+
+#pragma omp parallel if (plan.ops.size() > 1)
+    {
+#pragma omp for schedule(dynamic, 1)
+        for (int op_index = 0;
+             op_index < static_cast<int>(plan.ops.size()); ++op_index)
+        {
+            OmpLocalTransferOp &op = plan.ops[op_index];
+            double *packed = data + op.offset;
+            if (plan.type == 1)
+            {
+                f_copy(
+                    DIM, op.dst->llb, op.dst->uub, op.dst->shape, packed,
+                    op.src->Bg->bbox, op.src->Bg->bbox + dim,
+                    op.src->Bg->shape, op.src->Bg->fgfs[op.src_var->sgfn],
+                    op.dst->llb, op.dst->uub);
+            }
+            else if (plan.type == 2)
+            {
+                f_restrict3(
+                    DIM, op.dst->llb, op.dst->uub, op.dst->shape, packed,
+                    op.src->Bg->bbox, op.src->Bg->bbox + dim,
+                    op.src->Bg->shape, op.src->Bg->fgfs[op.src_var->sgfn],
+                    op.dst->llb, op.dst->uub, op.src_var->SoA, Symmetry);
+            }
+            else
+            {
+                f_prolong3(
+                    DIM, op.src->Bg->bbox, op.src->Bg->bbox + dim,
+                    op.src->Bg->shape, op.src->Bg->fgfs[op.src_var->sgfn],
+                    op.dst->llb, op.dst->uub, op.dst->shape, packed,
+                    op.dst->llb, op.dst->uub, op.src_var->SoA, Symmetry);
+            }
+        }
+
+#pragma omp for schedule(static)
+        for (int variable = 0;
+             variable < static_cast<int>(plan.variables.size()); ++variable)
+        {
+            for (size_t op_index = static_cast<size_t>(variable);
+                 op_index < plan.ops.size();
+                 op_index += plan.variables.size())
+            {
+                OmpLocalTransferOp &op = plan.ops[op_index];
+                f_copy(
+                    DIM, op.dst->Bg->bbox, op.dst->Bg->bbox + dim,
+                    op.dst->Bg->shape, op.dst->Bg->fgfs[op.dst_var->sgfn],
+                    op.dst->llb, op.dst->uub, op.dst->shape,
+                    data + op.offset, op.dst->llb, op.dst->uub);
+            }
+        }
+    }
+}
+
+OmpSyncGeometry *omp_get_patch_sync_geometry(Patch *patch)
+{
+    OmpSyncCache &cache = omp_sync_cache();
+    map<Patch *, OmpSyncGeometry *>::iterator found =
+        cache.patch_plans.find(patch);
+    MyList<Patch> one_patch(patch);
+    if (found != cache.patch_plans.end() &&
+        omp_sync_geometry_matches(*found->second, &one_patch))
+        return found->second;
+    if (found != cache.patch_plans.end())
+    {
+        delete found->second;
+        cache.patch_plans.erase(found);
+    }
+
+    OmpSyncGeometry *geometry = new OmpSyncGeometry;
+    omp_collect_patch_signature(
+        &one_patch, geometry->patches, geometry->blocks,
+        geometry->geometry);
+    geometry->dst = Parallel::build_ghost_gsl(patch);
+    geometry->src = Parallel::build_owned_gsl0(patch, 0);
+    Parallel::build_gstl(
+        geometry->src, geometry->dst,
+        &geometry->transfer_src, &geometry->transfer_dst);
+    cache.patch_plans[patch] = geometry;
+    return geometry;
+}
+
+OmpSyncGeometry *omp_get_list_sync_geometry(MyList<Patch> *patch_list)
+{
+    OmpSyncCache &cache = omp_sync_cache();
+    map<MyList<Patch> *, OmpSyncGeometry *>::iterator found =
+        cache.list_plans.find(patch_list);
+    if (found != cache.list_plans.end() &&
+        omp_sync_geometry_matches(*found->second, patch_list))
+        return found->second;
+    if (found != cache.list_plans.end())
+    {
+        delete found->second;
+        cache.list_plans.erase(found);
+    }
+
+    OmpSyncGeometry *geometry = new OmpSyncGeometry;
+    omp_collect_patch_signature(
+        patch_list, geometry->patches, geometry->blocks,
+        geometry->geometry);
+    geometry->dst = Parallel::build_buffer_gsl(patch_list);
+    geometry->src =
+        Parallel::build_owned_gsl(patch_list, 0, 5, 0);
+    Parallel::build_gstl(
+        geometry->src, geometry->dst,
+        &geometry->transfer_src, &geometry->transfer_dst);
+    cache.list_plans[patch_list] = geometry;
+    return geometry;
+}
+}
+#endif
 void Parallel::transfer(MyList<Parallel::gridseg> **src, MyList<Parallel::gridseg> **dst,
                                                 MyList<var> *VarList1 /* source */, MyList<var> *VarList2 /*target */,
                                                 int Symmetry)
@@ -2526,6 +3310,21 @@ void Parallel::transfer(MyList<Parallel::gridseg> **src, MyList<Parallel::gridse
     int myrank, cpusize;
     MPI_Comm_size(MPI_COMM_WORLD, &cpusize);
     MPI_Comm_rank(MPI_COMM_WORLD, &myrank);
+    if (cpusize == 1) {
+#ifdef AMSS_OMP_ONLY
+        omp_local_transfer(src[0], dst[0], VarList1, VarList2, Symmetry, false);
+#else
+        int length = data_packer(0, src[0], dst[0], 0, PACK, VarList1, VarList2, Symmetry);
+        if (length) {
+            double *local_data = new double[length];
+            data_packer(local_data, src[0], dst[0], 0, PACK, VarList1, VarList2, Symmetry);
+            data_packer(local_data, src[0], dst[0], 0, UNPACK, VarList1, VarList2, Symmetry);
+            delete[] local_data;
+        }
+#endif
+        return;
+    }
+
 
     int node;
 
@@ -2611,6 +3410,21 @@ void Parallel::transfermix(MyList<Parallel::gridseg> **src, MyList<Parallel::gri
     int myrank, cpusize;
     MPI_Comm_size(MPI_COMM_WORLD, &cpusize);
     MPI_Comm_rank(MPI_COMM_WORLD, &myrank);
+    if (cpusize == 1) {
+#ifdef AMSS_OMP_ONLY
+        omp_local_transfer(src[0], dst[0], VarList1, VarList2, Symmetry, true);
+#else
+        int length = data_packermix(0, src[0], dst[0], 0, PACK, VarList1, VarList2, Symmetry);
+        if (length) {
+            double *local_data = new double[length];
+            data_packermix(local_data, src[0], dst[0], 0, PACK, VarList1, VarList2, Symmetry);
+            data_packermix(local_data, src[0], dst[0], 0, UNPACK, VarList1, VarList2, Symmetry);
+            delete[] local_data;
+        }
+#endif
+        return;
+    }
+
 
     int node;
 
@@ -2694,6 +3508,12 @@ void Parallel::Sync(Patch *Pat, MyList<var> *VarList, int Symmetry)
     int cpusize;
     MPI_Comm_size(MPI_COMM_WORLD, &cpusize);
 
+#ifdef AMSS_OMP_ONLY
+    OmpSyncGeometry *geometry = omp_get_patch_sync_geometry(Pat);
+    omp_execute_cached_sync(*geometry, VarList, Symmetry);
+    return;
+#endif
+
     MyList<Parallel::gridseg> *dst;
     MyList<Parallel::gridseg> **src, **transfer_src, **transfer_dst;
     src = new MyList<Parallel::gridseg> *[cpusize];
@@ -2735,6 +3555,12 @@ void Parallel::Sync(MyList<Patch> *PatL, MyList<var> *VarList, int Symmetry)
         Sync(Pp->data, VarList, Symmetry);
         Pp = Pp->next;
     }
+
+#ifdef AMSS_OMP_ONLY
+    OmpSyncGeometry *geometry = omp_get_list_sync_geometry(PatL);
+    omp_execute_cached_sync(*geometry, VarList, Symmetry);
+    return;
+#endif
 
     // Patch inter Synch
     int cpusize;
@@ -3200,41 +4026,42 @@ void Parallel::prepare_inter_time_level(Patch *Pat,
     int myrank = 0;
     MPI_Comm_rank(MPI_COMM_WORLD, &myrank);
 
-    MyList<var> *varl1;
-    MyList<var> *varl2;
-    MyList<var> *varl3;
-
+    vector<Block *> local_blocks;
     MyList<Block> *BP = Pat->blb;
     while (BP)
     {
         Block *cg = BP->data;
         if (myrank == cg->rank)
-        {
-            varl1 = VarList1;
-            varl2 = VarList2;
-            varl3 = VarList3;
-            while (varl1)
-            {
-                if (tindex == 0)
-                    f_average(cg->shape, cg->fgfs[varl1->data->sgfn], cg->fgfs[varl2->data->sgfn], cg->fgfs[varl3->data->sgfn]);
-                else if (tindex == 1)
-                    f_average3(cg->shape, cg->fgfs[varl1->data->sgfn], cg->fgfs[varl2->data->sgfn], cg->fgfs[varl3->data->sgfn]);
-                else if (tindex == -1)
-                    // just change data order to use average3
-                    f_average3(cg->shape, cg->fgfs[varl2->data->sgfn], cg->fgfs[varl1->data->sgfn], cg->fgfs[varl3->data->sgfn]);
-                else
-                {
-                    cout << "error tindex in Parallel::prepare_inter_time_level" << endl;
-                    MPI_Abort(MPI_COMM_WORLD, 1);
-                }
-                varl1 = varl1->next;
-                varl2 = varl2->next;
-                varl3 = varl3->next;
-            }
-        }
+            local_blocks.push_back(cg);
         if (BP == Pat->ble)
             break;
         BP = BP->next;
+    }
+
+    #pragma omp parallel for schedule(static) if (local_blocks.size() > 1)
+    for (int block_index = 0; block_index < static_cast<int>(local_blocks.size()); ++block_index)
+    {
+        Block *cg = local_blocks[block_index];
+        MyList<var> *varl1 = VarList1;
+        MyList<var> *varl2 = VarList2;
+        MyList<var> *varl3 = VarList3;
+        while (varl1)
+        {
+            if (tindex == 0)
+                f_average(cg->shape, cg->fgfs[varl1->data->sgfn], cg->fgfs[varl2->data->sgfn], cg->fgfs[varl3->data->sgfn]);
+            else if (tindex == 1)
+                f_average3(cg->shape, cg->fgfs[varl1->data->sgfn], cg->fgfs[varl2->data->sgfn], cg->fgfs[varl3->data->sgfn]);
+            else if (tindex == -1)
+                f_average3(cg->shape, cg->fgfs[varl2->data->sgfn], cg->fgfs[varl1->data->sgfn], cg->fgfs[varl3->data->sgfn]);
+            else
+            {
+                cout << "error tindex in Parallel::prepare_inter_time_level" << endl;
+                MPI_Abort(MPI_COMM_WORLD, 1);
+            }
+            varl1 = varl1->next;
+            varl2 = varl2->next;
+            varl3 = varl3->next;
+        }
     }
 }
 void Parallel::prepare_inter_time_level(MyList<Patch> *PatL,
@@ -3254,46 +4081,47 @@ void Parallel::prepare_inter_time_level(Patch *Pat,
     int myrank = 0;
     MPI_Comm_rank(MPI_COMM_WORLD, &myrank);
 
-    MyList<var> *varl1;
-    MyList<var> *varl2;
-    MyList<var> *varl3;
-    MyList<var> *varl4;
-
+    vector<Block *> local_blocks;
     MyList<Block> *BP = Pat->blb;
     while (BP)
     {
         Block *cg = BP->data;
         if (myrank == cg->rank)
-        {
-            varl1 = VarList1;
-            varl2 = VarList2;
-            varl3 = VarList3;
-            varl4 = VarList4;
-            while (varl1)
-            {
-                if (tindex == 0)
-                    f_average2(cg->shape, cg->fgfs[varl1->data->sgfn], cg->fgfs[varl2->data->sgfn],
-                                         cg->fgfs[varl3->data->sgfn], cg->fgfs[varl4->data->sgfn]);
-                else if (tindex == 1)
-                    f_average2p(cg->shape, cg->fgfs[varl1->data->sgfn], cg->fgfs[varl2->data->sgfn],
-                                            cg->fgfs[varl3->data->sgfn], cg->fgfs[varl4->data->sgfn]);
-                else if (tindex == -1)
-                    f_average2m(cg->shape, cg->fgfs[varl1->data->sgfn], cg->fgfs[varl2->data->sgfn],
-                                            cg->fgfs[varl3->data->sgfn], cg->fgfs[varl4->data->sgfn]);
-                else
-                {
-                    cout << "error tindex in long cgh::prepare_inter_time_level" << endl;
-                    MPI_Abort(MPI_COMM_WORLD, 1);
-                }
-                varl1 = varl1->next;
-                varl2 = varl2->next;
-                varl3 = varl3->next;
-                varl4 = varl4->next;
-            }
-        }
+            local_blocks.push_back(cg);
         if (BP == Pat->ble)
             break;
         BP = BP->next;
+    }
+
+    #pragma omp parallel for schedule(static) if (local_blocks.size() > 1)
+    for (int block_index = 0; block_index < static_cast<int>(local_blocks.size()); ++block_index)
+    {
+        Block *cg = local_blocks[block_index];
+        MyList<var> *varl1 = VarList1;
+        MyList<var> *varl2 = VarList2;
+        MyList<var> *varl3 = VarList3;
+        MyList<var> *varl4 = VarList4;
+        while (varl1)
+        {
+            if (tindex == 0)
+                f_average2(cg->shape, cg->fgfs[varl1->data->sgfn], cg->fgfs[varl2->data->sgfn],
+                                     cg->fgfs[varl3->data->sgfn], cg->fgfs[varl4->data->sgfn]);
+            else if (tindex == 1)
+                f_average2p(cg->shape, cg->fgfs[varl1->data->sgfn], cg->fgfs[varl2->data->sgfn],
+                                        cg->fgfs[varl3->data->sgfn], cg->fgfs[varl4->data->sgfn]);
+            else if (tindex == -1)
+                f_average2m(cg->shape, cg->fgfs[varl1->data->sgfn], cg->fgfs[varl2->data->sgfn],
+                                        cg->fgfs[varl3->data->sgfn], cg->fgfs[varl4->data->sgfn]);
+            else
+            {
+                cout << "error tindex in long cgh::prepare_inter_time_level" << endl;
+                MPI_Abort(MPI_COMM_WORLD, 1);
+            }
+            varl1 = varl1->next;
+            varl2 = varl2->next;
+            varl3 = varl3->next;
+            varl4 = varl4->next;
+        }
     }
 }
 void Parallel::Prolong(Patch *Patc, Patch *Patf,

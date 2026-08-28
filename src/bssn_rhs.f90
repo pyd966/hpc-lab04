@@ -85,6 +85,11 @@
 
   real*8,dimension(3) ::SSS,AAS,ASA,SAA,ASS,SAS,SSA
   real*8            :: dX, dY, dZ, PI
+  real*8            :: txx, txy, txz, tyy, tyz, tzz, fval
+  integer :: i, j, k
+#ifdef AMSS_ENABLE_RHS_RICCI_TILING
+  integer :: jb, jend
+#endif
   real*8, parameter :: ZEO = 0.d0,ONE = 1.D0, TWO = 2.D0, FOUR = 4.D0
   real*8, parameter :: EIGHT = 8.D0, HALF = 0.5D0, THR = 3.d0
   real*8, parameter :: SYM = 1.D0, ANTI= - 1.D0
@@ -94,6 +99,7 @@
 
 
 
+#ifdef AMSS_ENABLE_RHS_SANITY_CHECK
 !!! sanity check
   dX = sum(chi)+sum(trK)+sum(dxx)+sum(gxy)+sum(gxz)+sum(dyy)+sum(gyz)+sum(dzz) &
       +sum(Axx)+sum(Axy)+sum(Axz)+sum(Ayy)+sum(Ayz)+sum(Azz)                   &
@@ -124,6 +130,7 @@
      gont = 1
      return
   endif
+#endif
 
   PI = dacos(-ONE)
 
@@ -131,11 +138,28 @@
   dY = Y(2) - Y(1)
   dZ = Z(2) - Z(1)
 
+#ifdef AMSS_ENABLE_RHS_METRIC_FUSION
+! These five fields are independent pointwise transforms.  Keep them in one
+! contiguous traversal so their input values are loaded together.
+  do k=1,ex(3)
+  do j=1,ex(2)
+!$omp simd
+  do i=1,ex(1)
+    alpn1(i,j,k) = Lap(i,j,k) + ONE
+    chin1(i,j,k) = chi(i,j,k) + ONE
+    gxx(i,j,k) = dxx(i,j,k) + ONE
+    gyy(i,j,k) = dyy(i,j,k) + ONE
+    gzz(i,j,k) = dzz(i,j,k) + ONE
+  enddo
+  enddo
+  enddo
+#else
   alpn1 = Lap + ONE
   chin1 = chi + ONE
   gxx = dxx + ONE
   gyy = dyy + ONE
   gzz = dzz + ONE
+#endif
 
   call fderivs(ex,betax,betaxx,betaxy,betaxz,X,Y,Z,ANTI, SYM, SYM,Symmetry,Lev)
   call fderivs(ex,betay,betayx,betayy,betayz,X,Y,Z, SYM,ANTI, SYM,Symmetry,Lev)
@@ -147,13 +171,63 @@
 
   chi_rhs = F2o3 *chin1*( alpn1 * trK - div_beta ) !rhs for chi
 
+#ifdef AMSS_FDERIVS_BATCH
+  call fderivs2(ex,dxx,gxxx,gxxy,gxxz,gxy,gxyx,gxyy,gxyz,X,Y,Z, &
+                SYM,SYM,SYM,ANTI,ANTI,SYM,Symmetry,Lev)
+  call fderivs2(ex,gxz,gxzx,gxzy,gxzz,dyy,gyyx,gyyy,gyyz,X,Y,Z, &
+                ANTI,SYM,ANTI,SYM,SYM,SYM,Symmetry,Lev)
+  call fderivs2(ex,gyz,gyzx,gyzy,gyzz,dzz,gzzx,gzzy,gzzz,X,Y,Z, &
+                SYM,ANTI,ANTI,SYM,SYM,SYM,Symmetry,Lev)
+#else
   call fderivs(ex,dxx,gxxx,gxxy,gxxz,X,Y,Z,SYM ,SYM ,SYM ,Symmetry,Lev)
   call fderivs(ex,gxy,gxyx,gxyy,gxyz,X,Y,Z,ANTI,ANTI,SYM ,Symmetry,Lev)
   call fderivs(ex,gxz,gxzx,gxzy,gxzz,X,Y,Z,ANTI,SYM ,ANTI,Symmetry,Lev)
   call fderivs(ex,dyy,gyyx,gyyy,gyyz,X,Y,Z,SYM ,SYM ,SYM ,Symmetry,Lev)
   call fderivs(ex,gyz,gyzx,gyzy,gyzz,X,Y,Z,SYM ,ANTI,ANTI,Symmetry,Lev)
   call fderivs(ex,dzz,gzzx,gzzy,gzzz,X,Y,Z,SYM ,SYM ,SYM ,Symmetry,Lev)
+#endif
 
+#ifdef AMSS_ENABLE_RHS_METRIC_FUSION
+! The six metric RHS expressions are pointwise independent.  Fuse their
+! traversal after all metric derivatives have been produced.
+  do k=1,ex(3)
+  do j=1,ex(2)
+!$omp simd
+  do i=1,ex(1)
+    gxx_rhs(i,j,k) = - TWO * alpn1(i,j,k) * Axx(i,j,k) - &
+                     F2o3 * gxx(i,j,k) * div_beta(i,j,k) + &
+                     TWO * (gxx(i,j,k) * betaxx(i,j,k) + &
+                            gxy(i,j,k) * betayx(i,j,k) + &
+                            gxz(i,j,k) * betazx(i,j,k))
+    gyy_rhs(i,j,k) = - TWO * alpn1(i,j,k) * Ayy(i,j,k) - &
+                     F2o3 * gyy(i,j,k) * div_beta(i,j,k) + &
+                     TWO * (gxy(i,j,k) * betaxy(i,j,k) + &
+                            gyy(i,j,k) * betayy(i,j,k) + &
+                            gyz(i,j,k) * betazy(i,j,k))
+    gzz_rhs(i,j,k) = - TWO * alpn1(i,j,k) * Azz(i,j,k) - &
+                     F2o3 * gzz(i,j,k) * div_beta(i,j,k) + &
+                     TWO * (gxz(i,j,k) * betaxz(i,j,k) + &
+                            gyz(i,j,k) * betayz(i,j,k) + &
+                            gzz(i,j,k) * betazz(i,j,k))
+    gxy_rhs(i,j,k) = - TWO * alpn1(i,j,k) * Axy(i,j,k) + &
+                     F1o3 * gxy(i,j,k) * div_beta(i,j,k) + &
+                     gxx(i,j,k) * betaxy(i,j,k) + gxz(i,j,k) * betazy(i,j,k) + &
+                     gyy(i,j,k) * betayx(i,j,k) + gyz(i,j,k) * betazx(i,j,k) - &
+                     gxy(i,j,k) * betazz(i,j,k)
+    gyz_rhs(i,j,k) = - TWO * alpn1(i,j,k) * Ayz(i,j,k) + &
+                     F1o3 * gyz(i,j,k) * div_beta(i,j,k) + &
+                     gxy(i,j,k) * betaxz(i,j,k) + gyy(i,j,k) * betayz(i,j,k) + &
+                     gxz(i,j,k) * betaxy(i,j,k) + gzz(i,j,k) * betazy(i,j,k) - &
+                     gyz(i,j,k) * betaxx(i,j,k)
+    gxz_rhs(i,j,k) = - TWO * alpn1(i,j,k) * Axz(i,j,k) + &
+                     F1o3 * gxz(i,j,k) * div_beta(i,j,k) + &
+                     gxx(i,j,k) * betaxz(i,j,k) + gxy(i,j,k) * betayz(i,j,k) + &
+                     gyz(i,j,k) * betayx(i,j,k) + gzz(i,j,k) * betazx(i,j,k) - &
+                     gxz(i,j,k) * betayy(i,j,k)
+  enddo
+  enddo
+  enddo
+#else
   gxx_rhs = - TWO * alpn1 * Axx    -  F2o3 * gxx * div_beta          + &
               TWO *(  gxx * betaxx +   gxy * betayx +   gxz * betazx)
 
@@ -177,6 +251,7 @@
                       gxx * betaxz +   gxy * betayz                  + &
                                        gyz * betayx +   gzz * betazx   &
                                                     -   gxz * betayy     !rhs for gij
+#endif
 
 ! invert tilted metric
   gupzz =  gxx * gyy * gzz + gxy * gyz * gxz + gxz * gxy * gyz - &
@@ -220,6 +295,88 @@
   endif
 
 ! second kind of connection
+#ifdef AMSS_ENABLE_RHS_CONNECTION_FUSION
+! These 18 pointwise connection components share the same inverse metric and
+! derivative inputs.  Keep each expression's arithmetic order, but load the
+! common inputs once per grid point instead of traversing the arrays 18 times.
+  do k=1,ex(3)
+  do j=1,ex(2)
+!$omp simd
+  do i=1,ex(1)
+    Gamxxx(i,j,k) = HALF*( gupxx(i,j,k)*gxxx(i,j,k) + &
+      gupxy(i,j,k)*(TWO*gxyx(i,j,k) - gxxy(i,j,k)) + &
+      gupxz(i,j,k)*(TWO*gxzx(i,j,k) - gxxz(i,j,k)) )
+    Gamyxx(i,j,k) = HALF*( gupxy(i,j,k)*gxxx(i,j,k) + &
+      gupyy(i,j,k)*(TWO*gxyx(i,j,k) - gxxy(i,j,k)) + &
+      gupyz(i,j,k)*(TWO*gxzx(i,j,k) - gxxz(i,j,k)) )
+    Gamzxx(i,j,k) = HALF*( gupxz(i,j,k)*gxxx(i,j,k) + &
+      gupyz(i,j,k)*(TWO*gxyx(i,j,k) - gxxy(i,j,k)) + &
+      gupzz(i,j,k)*(TWO*gxzx(i,j,k) - gxxz(i,j,k)) )
+  enddo
+  enddo
+  enddo
+
+  do k=1,ex(3)
+  do j=1,ex(2)
+!$omp simd
+  do i=1,ex(1)
+    Gamxyy(i,j,k) = HALF*( gupxx(i,j,k)*(TWO*gxyy(i,j,k) - gyyx(i,j,k)) + &
+      gupxy(i,j,k)*gyyy(i,j,k) + &
+      gupxz(i,j,k)*(TWO*gyzy(i,j,k) - gyyz(i,j,k)) )
+    Gamyyy(i,j,k) = HALF*( gupxy(i,j,k)*(TWO*gxyy(i,j,k) - gyyx(i,j,k)) + &
+      gupyy(i,j,k)*gyyy(i,j,k) + &
+      gupyz(i,j,k)*(TWO*gyzy(i,j,k) - gyyz(i,j,k)) )
+    Gamzyy(i,j,k) = HALF*( gupxz(i,j,k)*(TWO*gxyy(i,j,k) - gyyx(i,j,k)) + &
+      gupyz(i,j,k)*gyyy(i,j,k) + &
+      gupzz(i,j,k)*(TWO*gyzy(i,j,k) - gyyz(i,j,k)) )
+
+    Gamxzz(i,j,k) = HALF*( gupxx(i,j,k)*(TWO*gxzz(i,j,k) - gzzx(i,j,k)) + &
+      gupxy(i,j,k)*(TWO*gyzz(i,j,k) - gzzy(i,j,k)) + &
+      gupxz(i,j,k)*gzzz(i,j,k) )
+    Gamyzz(i,j,k) = HALF*( gupxy(i,j,k)*(TWO*gxzz(i,j,k) - gzzx(i,j,k)) + &
+      gupyy(i,j,k)*(TWO*gyzz(i,j,k) - gzzy(i,j,k)) + &
+      gupyz(i,j,k)*gzzz(i,j,k) )
+    Gamzzz(i,j,k) = HALF*( gupxz(i,j,k)*(TWO*gxzz(i,j,k) - gzzx(i,j,k)) + &
+      gupyz(i,j,k)*(TWO*gyzz(i,j,k) - gzzy(i,j,k)) + &
+      gupzz(i,j,k)*gzzz(i,j,k) )
+  enddo
+  enddo
+  enddo
+
+  do k=1,ex(3)
+  do j=1,ex(2)
+!$omp simd
+  do i=1,ex(1)
+    Gamxxy(i,j,k) = HALF*( gupxx(i,j,k)*gxxy(i,j,k) + &
+      gupxy(i,j,k)*gyyx(i,j,k) + &
+      gupxz(i,j,k)*(gxzy(i,j,k) + gyzx(i,j,k) - gxyz(i,j,k)) )
+    Gamyxy(i,j,k) = HALF*( gupxy(i,j,k)*gxxy(i,j,k) + &
+      gupyy(i,j,k)*gyyx(i,j,k) + &
+      gupyz(i,j,k)*(gxzy(i,j,k) + gyzx(i,j,k) - gxyz(i,j,k)) )
+    Gamzxy(i,j,k) = HALF*( gupxz(i,j,k)*gxxy(i,j,k) + &
+      gupyz(i,j,k)*gyyx(i,j,k) + &
+      gupzz(i,j,k)*(gxzy(i,j,k) + gyzx(i,j,k) - gxyz(i,j,k)) )
+
+    Gamxxz(i,j,k) = HALF*( gupxx(i,j,k)*gxxz(i,j,k) + &
+      gupxy(i,j,k)*(gxyz(i,j,k) + gyzx(i,j,k) - gxzy(i,j,k)) + &
+      gupxz(i,j,k)*gzzx(i,j,k) )
+    Gamyxz(i,j,k) = HALF*( gupxy(i,j,k)*gxxz(i,j,k) + &
+      gupyy(i,j,k)*(gxyz(i,j,k) + gyzx(i,j,k) - gxzy(i,j,k)) + &
+      gupyz(i,j,k)*gzzx(i,j,k) )
+    Gamzxz(i,j,k) = HALF*( gupxz(i,j,k)*gxxz(i,j,k) + &
+      gupyz(i,j,k)*(gxyz(i,j,k) + gyzx(i,j,k) - gxzy(i,j,k)) + &
+      gupzz(i,j,k)*gzzx(i,j,k) )
+
+    Gamxyz(i,j,k) = HALF*( gupxx(i,j,k)*(gxyz(i,j,k) + gxzy(i,j,k) - gyzx(i,j,k)) + &
+      gupxy(i,j,k)*gyyz(i,j,k) + gupxz(i,j,k)*gzzy(i,j,k) )
+    Gamyyz(i,j,k) = HALF*( gupxy(i,j,k)*(gxyz(i,j,k) + gxzy(i,j,k) - gyzx(i,j,k)) + &
+      gupyy(i,j,k)*gyyz(i,j,k) + gupyz(i,j,k)*gzzy(i,j,k) )
+    Gamzyz(i,j,k) = HALF*( gupxz(i,j,k)*(gxyz(i,j,k) + gxzy(i,j,k) - gyzx(i,j,k)) + &
+      gupyz(i,j,k)*gyyz(i,j,k) + gupzz(i,j,k)*gzzy(i,j,k) )
+  enddo
+  enddo
+  enddo
+#else
   Gamxxx =HALF*( gupxx*gxxx + gupxy*(TWO*gxyx - gxxy ) + gupxz*(TWO*gxzx - gxxz ))
   Gamyxx =HALF*( gupxy*gxxx + gupyy*(TWO*gxyx - gxxy ) + gupyz*(TWO*gxzx - gxxz ))
   Gamzxx =HALF*( gupxz*gxxx + gupyz*(TWO*gxyx - gxxy ) + gupzz*(TWO*gxzx - gxxz ))
@@ -243,7 +400,55 @@
   Gamxyz =HALF*( gupxx*( gxyz + gxzy - gyzx ) + gupxy*gyyz + gupxz*gzzy )
   Gamyyz =HALF*( gupxy*( gxyz + gxzy - gyzx ) + gupyy*gyyz + gupyz*gzzy )
   Gamzyz =HALF*( gupxz*( gxyz + gxzy - gyzx ) + gupyz*gyyz + gupzz*gzzy )
+#endif
 ! Raise indices of \tilde A_{ij} and store in R_ij
+#ifdef AMSS_ENABLE_RHS_AIJ_FUSION
+! The six raised Aij components are independent pointwise transforms.  They
+! are consumed immediately by the Gamma RHS, so keep them in one traversal.
+  do k=1,ex(3)
+  do j=1,ex(2)
+!$omp simd
+  do i=1,ex(1)
+    Rxx(i,j,k) = gupxx(i,j,k)*gupxx(i,j,k)*Axx(i,j,k) + &
+      gupxy(i,j,k)*gupxy(i,j,k)*Ayy(i,j,k) + &
+      gupxz(i,j,k)*gupxz(i,j,k)*Azz(i,j,k) + TWO*( &
+      gupxx(i,j,k)*gupxy(i,j,k)*Axy(i,j,k) + &
+      gupxx(i,j,k)*gupxz(i,j,k)*Axz(i,j,k) + &
+      gupxy(i,j,k)*gupxz(i,j,k)*Ayz(i,j,k))
+    Ryy(i,j,k) = gupxy(i,j,k)*gupxy(i,j,k)*Axx(i,j,k) + &
+      gupyy(i,j,k)*gupyy(i,j,k)*Ayy(i,j,k) + &
+      gupyz(i,j,k)*gupyz(i,j,k)*Azz(i,j,k) + TWO*( &
+      gupxy(i,j,k)*gupyy(i,j,k)*Axy(i,j,k) + &
+      gupxy(i,j,k)*gupyz(i,j,k)*Axz(i,j,k) + &
+      gupyy(i,j,k)*gupyz(i,j,k)*Ayz(i,j,k))
+    Rzz(i,j,k) = gupxz(i,j,k)*gupxz(i,j,k)*Axx(i,j,k) + &
+      gupyz(i,j,k)*gupyz(i,j,k)*Ayy(i,j,k) + &
+      gupzz(i,j,k)*gupzz(i,j,k)*Azz(i,j,k) + TWO*( &
+      gupxz(i,j,k)*gupyz(i,j,k)*Axy(i,j,k) + &
+      gupxz(i,j,k)*gupzz(i,j,k)*Axz(i,j,k) + &
+      gupyz(i,j,k)*gupzz(i,j,k)*Ayz(i,j,k))
+    Rxy(i,j,k) = gupxx(i,j,k)*gupxy(i,j,k)*Axx(i,j,k) + &
+      gupxy(i,j,k)*gupyy(i,j,k)*Ayy(i,j,k) + &
+      gupxz(i,j,k)*gupyz(i,j,k)*Azz(i,j,k) + &
+      (gupxx(i,j,k)*gupyy(i,j,k) + gupxy(i,j,k)*gupxy(i,j,k))*Axy(i,j,k) + &
+      (gupxx(i,j,k)*gupyz(i,j,k) + gupxz(i,j,k)*gupxy(i,j,k))*Axz(i,j,k) + &
+      (gupxy(i,j,k)*gupyz(i,j,k) + gupxz(i,j,k)*gupyy(i,j,k))*Ayz(i,j,k)
+    Rxz(i,j,k) = gupxx(i,j,k)*gupxz(i,j,k)*Axx(i,j,k) + &
+      gupxy(i,j,k)*gupyz(i,j,k)*Ayy(i,j,k) + &
+      gupxz(i,j,k)*gupzz(i,j,k)*Azz(i,j,k) + &
+      (gupxx(i,j,k)*gupyz(i,j,k) + gupxy(i,j,k)*gupxz(i,j,k))*Axy(i,j,k) + &
+      (gupxx(i,j,k)*gupzz(i,j,k) + gupxz(i,j,k)*gupxz(i,j,k))*Axz(i,j,k) + &
+      (gupxy(i,j,k)*gupzz(i,j,k) + gupxz(i,j,k)*gupyz(i,j,k))*Ayz(i,j,k)
+    Ryz(i,j,k) = gupxy(i,j,k)*gupxz(i,j,k)*Axx(i,j,k) + &
+      gupyy(i,j,k)*gupyz(i,j,k)*Ayy(i,j,k) + &
+      gupyz(i,j,k)*gupzz(i,j,k)*Azz(i,j,k) + &
+      (gupxy(i,j,k)*gupyz(i,j,k) + gupyy(i,j,k)*gupxz(i,j,k))*Axy(i,j,k) + &
+      (gupxy(i,j,k)*gupzz(i,j,k) + gupyz(i,j,k)*gupxz(i,j,k))*Axz(i,j,k) + &
+      (gupyy(i,j,k)*gupzz(i,j,k) + gupyz(i,j,k)*gupyz(i,j,k))*Ayz(i,j,k)
+  enddo
+  enddo
+  enddo
+#else
 
   Rxx =    gupxx * gupxx * Axx + gupxy * gupxy * Ayy + gupxz * gupxz * Azz + &
       TWO*(gupxx * gupxy * Axy + gupxx * gupxz * Axz + gupxy * gupxz * Ayz)
@@ -268,6 +473,7 @@
           (gupxy * gupyz       + gupyy * gupxz)* Axy                       + &
           (gupxy * gupzz       + gupyz * gupxz)* Axz                       + &
           (gupyy * gupzz       + gupyz * gupyz)* Ayz
+#endif
 
 ! Right hand side for Gam^i without shift terms...
   call fderivs(ex,Lap,Lapx,Lapy,Lapz,X,Y,Z,SYM,SYM,SYM,Symmetry,Lev)
@@ -322,6 +528,41 @@
   call fderivs(ex,Gamy,Gamyx,Gamyy,Gamyz,X,Y,Z,SYM ,ANTI,SYM ,Symmetry,Lev)
   call fderivs(ex,Gamz,Gamzx,Gamzy,Gamzz,X,Y,Z,SYM ,SYM ,ANTI,Symmetry,Lev)
 
+#ifdef AMSS_ENABLE_RHS_GAMMA_FUSION
+! Gamma RHS components are independent pointwise updates.  Keep their
+! arithmetic order, but traverse the block once instead of three times.
+  do k=1,ex(3)
+  do j=1,ex(2)
+!$omp simd
+  do i=1,ex(1)
+    Gamx_rhs(i,j,k) = Gamx_rhs(i,j,k) + F2o3 * Gamxa(i,j,k) * div_beta(i,j,k) - &
+      Gamxa(i,j,k) * betaxx(i,j,k) - Gamya(i,j,k) * betaxy(i,j,k) - &
+      Gamza(i,j,k) * betaxz(i,j,k) + &
+      F1o3 * (gupxx(i,j,k) * fxx(i,j,k) + gupxy(i,j,k) * fxy(i,j,k) + &
+              gupxz(i,j,k) * fxz(i,j,k)) + &
+      gupxx(i,j,k) * gxxx(i,j,k) + gupyy(i,j,k) * gyyx(i,j,k) + &
+      gupzz(i,j,k) * gzzx(i,j,k) + TWO * (gupxy(i,j,k) * gxyx(i,j,k) + &
+      gupxz(i,j,k) * gxzx(i,j,k) + gupyz(i,j,k) * gyzx(i,j,k))
+    Gamy_rhs(i,j,k) = Gamy_rhs(i,j,k) + F2o3 * Gamya(i,j,k) * div_beta(i,j,k) - &
+      Gamxa(i,j,k) * betayx(i,j,k) - Gamya(i,j,k) * betayy(i,j,k) - &
+      Gamza(i,j,k) * betayz(i,j,k) + &
+      F1o3 * (gupxy(i,j,k) * fxx(i,j,k) + gupyy(i,j,k) * fxy(i,j,k) + &
+              gupyz(i,j,k) * fxz(i,j,k)) + &
+      gupxx(i,j,k) * gxxy(i,j,k) + gupyy(i,j,k) * gyyy(i,j,k) + &
+      gupzz(i,j,k) * gzzy(i,j,k) + TWO * (gupxy(i,j,k) * gxyy(i,j,k) + &
+      gupxz(i,j,k) * gxzy(i,j,k) + gupyz(i,j,k) * gyzy(i,j,k))
+    Gamz_rhs(i,j,k) = Gamz_rhs(i,j,k) + F2o3 * Gamza(i,j,k) * div_beta(i,j,k) - &
+      Gamxa(i,j,k) * betazx(i,j,k) - Gamya(i,j,k) * betazy(i,j,k) - &
+      Gamza(i,j,k) * betazz(i,j,k) + &
+      F1o3 * (gupxz(i,j,k) * fxx(i,j,k) + gupyz(i,j,k) * fxy(i,j,k) + &
+              gupzz(i,j,k) * fxz(i,j,k)) + &
+      gupxx(i,j,k) * gxxz(i,j,k) + gupyy(i,j,k) * gyyz(i,j,k) + &
+      gupzz(i,j,k) * gzzz(i,j,k) + TWO * (gupxy(i,j,k) * gxyz(i,j,k) + &
+      gupxz(i,j,k) * gxzz(i,j,k) + gupyz(i,j,k) * gyzz(i,j,k))
+  enddo
+  enddo
+  enddo
+#else
   Gamx_rhs =               Gamx_rhs +  F2o3 *  Gamxa * div_beta        - &
                      Gamxa * betaxx - Gamya * betaxy - Gamza * betaxz  + &
              F1o3 * (gupxx * fxx    + gupxy * fxy    + gupxz * fxz    ) + &
@@ -339,6 +580,7 @@
              F1o3 * (gupxz * fxx    + gupyz * fxy    + gupzz * fxz    ) + &
                      gupxx * gxxz   + gupyy * gyyz   + gupzz * gzzz    + &
               TWO * (gupxy * gxyz   + gupxz * gxzz   + gupyz * gyzz  )    !rhs for Gam^i
+#endif
 
 !first kind of connection stored in gij,k
   gxxx = gxx * Gamxxx + gxy * Gamyxx + gxz * Gamzxx
@@ -387,6 +629,9 @@
    Ryz =   gupxx * fxx + gupyy * fyy + gupzz * fzz + &
          ( gupxy * fxy + gupxz * fxz + gupyz * fyz ) * TWO
 
+#ifdef AMSS_ENABLE_RHS_RICCI_TILING
+#include "bssn_ricci_tiled.inc"
+#else
   Rxx =     - HALF * Rxx                                   + &
                gxx * Gamxx+ gxy * Gamyx   +    gxz * Gamzx + &
              Gamxa * gxxx +  Gamya * gxyx +  Gamza * gxzx  + &
@@ -587,9 +832,53 @@
             Gamxyz * gxzz + Gamyyz * gyzz + Gamzyz * gzzz  + &
             Gamxzz * gxzy + Gamyzz * gyzy + Gamzzz * gzzy  + &
             Gamxyz * gzzx + Gamyyz * gzzy + Gamzyz * gzzz )
+#endif
 !covariant second derivative of chi respect to tilted metric
   call fdderivs(ex,chi,fxx,fxy,fxz,fyy,fyz,fzz,X,Y,Z,SYM,SYM,SYM,Symmetry,Lev)
 
+#ifdef AMSS_ENABLE_RHS_CHI_RICCI_FUSION
+! fxx..fzz are dead after the six Ricci updates and are overwritten by the
+! next fdderivs(Lap,...) call.  Keep the corrected values in SIMD-private
+! scalars and avoid seven full-array stores and reloads.
+  do k=1,ex(3)
+  do j=1,ex(2)
+!$omp simd private(txx,txy,txz,tyy,tyz,tzz,fval)
+  do i=1,ex(1)
+    txx = fxx(i,j,k) - Gamxxx(i,j,k)*chix(i,j,k) - &
+      Gamyxx(i,j,k)*chiy(i,j,k) - Gamzxx(i,j,k)*chiz(i,j,k)
+    txy = fxy(i,j,k) - Gamxxy(i,j,k)*chix(i,j,k) - &
+      Gamyxy(i,j,k)*chiy(i,j,k) - Gamzxy(i,j,k)*chiz(i,j,k)
+    txz = fxz(i,j,k) - Gamxxz(i,j,k)*chix(i,j,k) - &
+      Gamyxz(i,j,k)*chiy(i,j,k) - Gamzxz(i,j,k)*chiz(i,j,k)
+    tyy = fyy(i,j,k) - Gamxyy(i,j,k)*chix(i,j,k) - &
+      Gamyyy(i,j,k)*chiy(i,j,k) - Gamzyy(i,j,k)*chiz(i,j,k)
+    tyz = fyz(i,j,k) - Gamxyz(i,j,k)*chix(i,j,k) - &
+      Gamyyz(i,j,k)*chiy(i,j,k) - Gamzyz(i,j,k)*chiz(i,j,k)
+    tzz = fzz(i,j,k) - Gamxzz(i,j,k)*chix(i,j,k) - &
+      Gamyzz(i,j,k)*chiy(i,j,k) - Gamzzz(i,j,k)*chiz(i,j,k)
+    fval = gupxx(i,j,k)*(txx - F3o2/chin1(i,j,k)*chix(i,j,k)*chix(i,j,k)) + &
+      gupyy(i,j,k)*(tyy - F3o2/chin1(i,j,k)*chiy(i,j,k)*chiy(i,j,k)) + &
+      gupzz(i,j,k)*(tzz - F3o2/chin1(i,j,k)*chiz(i,j,k)*chiz(i,j,k)) + &
+      TWO*gupxy(i,j,k)*(txy - F3o2/chin1(i,j,k)*chix(i,j,k)*chiy(i,j,k)) + &
+      TWO*gupxz(i,j,k)*(txz - F3o2/chin1(i,j,k)*chix(i,j,k)*chiz(i,j,k)) + &
+      TWO*gupyz(i,j,k)*(tyz - F3o2/chin1(i,j,k)*chiy(i,j,k)*chiz(i,j,k))
+    fxx(i,j,k) = txx
+    fxy(i,j,k) = txy
+    fxz(i,j,k) = txz
+    fyy(i,j,k) = tyy
+    fyz(i,j,k) = tyz
+    fzz(i,j,k) = tzz
+    f(i,j,k) = fval
+  enddo
+  enddo
+  enddo
+  Rxx = Rxx + (fxx - chix*chix/chin1/TWO + gxx * f)/chin1/TWO
+  Ryy = Ryy + (fyy - chiy*chiy/chin1/TWO + gyy * f)/chin1/TWO
+  Rzz = Rzz + (fzz - chiz*chiz/chin1/TWO + gzz * f)/chin1/TWO
+  Rxy = Rxy + (fxy - chix*chiy/chin1/TWO + gxy * f)/chin1/TWO
+  Rxz = Rxz + (fxz - chix*chiz/chin1/TWO + gxz * f)/chin1/TWO
+  Ryz = Ryz + (fyz - chiy*chiz/chin1/TWO + gyz * f)/chin1/TWO
+#else
   fxx = fxx - Gamxxx * chix - Gamyxx * chiy - Gamzxx * chiz
   fxy = fxy - Gamxxy * chix - Gamyxy * chiy - Gamzxy * chiz
   fxz = fxz - Gamxxz * chix - Gamyxz * chiy - Gamzxz * chiz
@@ -612,14 +901,48 @@
   Rxy = Rxy + (fxy - chix*chiy/chin1/TWO + gxy * f)/chin1/TWO
   Rxz = Rxz + (fxz - chix*chiz/chin1/TWO + gxz * f)/chin1/TWO
   Ryz = Ryz + (fyz - chiy*chiz/chin1/TWO + gyz * f)/chin1/TWO
+#endif
 
 ! covariant second derivatives of the lapse respect to physical metric
   call fdderivs(ex,Lap,fxx,fxy,fxz,fyy,fyz,fzz,X,Y,Z, &
                 SYM,SYM,SYM,symmetry,Lev)
 
+#ifdef AMSS_ENABLE_RHS_FIRST_CONNECTION_FUSION
+! These three independent arrays used to be assigned by three full-grid
+! array-expression passes. Keep the same arithmetic while traversing i once.
+  do k=1,ex(3)
+  do j=1,ex(2)
+!$omp simd
+  do i=1,ex(1)
+    gxxx(i,j,k) = (gupxx(i,j,k) * chix(i,j,k) + gupxy(i,j,k) * chiy(i,j,k) + &
+                   gupxz(i,j,k) * chiz(i,j,k))/chin1(i,j,k)
+    gxxy(i,j,k) = (gupxy(i,j,k) * chix(i,j,k) + gupyy(i,j,k) * chiy(i,j,k) + &
+                   gupyz(i,j,k) * chiz(i,j,k))/chin1(i,j,k)
+    gxxz(i,j,k) = (gupxz(i,j,k) * chix(i,j,k) + gupyz(i,j,k) * chiy(i,j,k) + &
+                   gupzz(i,j,k) * chiz(i,j,k))/chin1(i,j,k)
+  enddo
+  enddo
+  enddo
+#elif defined(AMSS_ENABLE_RHS_FIRST_CONNECTION_PAIR_FUSION)
+! A smaller variant keeps gxxz in the compiler's original array-expression
+! path, reducing the number of simultaneous output streams in the loop.
+  do k=1,ex(3)
+  do j=1,ex(2)
+!$omp simd
+  do i=1,ex(1)
+    gxxx(i,j,k) = (gupxx(i,j,k) * chix(i,j,k) + gupxy(i,j,k) * chiy(i,j,k) + &
+                   gupxz(i,j,k) * chiz(i,j,k))/chin1(i,j,k)
+    gxxy(i,j,k) = (gupxy(i,j,k) * chix(i,j,k) + gupyy(i,j,k) * chiy(i,j,k) + &
+                   gupyz(i,j,k) * chiz(i,j,k))/chin1(i,j,k)
+  enddo
+  enddo
+  enddo
+  gxxz = (gupxz * chix + gupyz * chiy + gupzz * chiz)/chin1
+#else
   gxxx = (gupxx * chix + gupxy * chiy + gupxz * chiz)/chin1
   gxxy = (gupxy * chix + gupyy * chiy + gupyz * chiz)/chin1
   gxxz = (gupxz * chix + gupyz * chiy + gupzz * chiz)/chin1
+#endif
 ! now get physical second kind of connection
   Gamxxx = Gamxxx - ( (chix + chix)/chin1 - gxx * gxxx )*HALF
   Gamyxx = Gamyxx - (                     - gxx * gxxy )*HALF
@@ -815,36 +1138,48 @@
 
 !!!!!!!!!advection term part
 
-  call lopsided(ex,X,Y,Z,gxx,gxx_rhs,betax,betay,betaz,Symmetry,SSS)
-  call lopsided(ex,X,Y,Z,gxy,gxy_rhs,betax,betay,betaz,Symmetry,AAS)
-  call lopsided(ex,X,Y,Z,gxz,gxz_rhs,betax,betay,betaz,Symmetry,ASA)
-  call lopsided(ex,X,Y,Z,gyy,gyy_rhs,betax,betay,betaz,Symmetry,SSS)
-  call lopsided(ex,X,Y,Z,gyz,gyz_rhs,betax,betay,betaz,Symmetry,SAA)
-  call lopsided(ex,X,Y,Z,gzz,gzz_rhs,betax,betay,betaz,Symmetry,SSS)
+#ifdef AMSS_ENABLE_LOPSIDEDIFF_BATCH
+  call lopsided2(ex,X,Y,Z,gxx,gxx_rhs,gxy,gxy_rhs,betax,betay,betaz,Symmetry,SSS,AAS)
+  call lopsided2(ex,X,Y,Z,gxz,gxz_rhs,gyy,gyy_rhs,betax,betay,betaz,Symmetry,ASA,SSS)
+  call lopsided2(ex,X,Y,Z,gyz,gyz_rhs,gzz,gzz_rhs,betax,betay,betaz,Symmetry,SAA,SSS)
+#else
+  call lopsided(ex,X,Y,Z,gxx,gxx_rhs,betax,betay,betaz,Symmetry,SSS,.false.)
+  call lopsided(ex,X,Y,Z,gxy,gxy_rhs,betax,betay,betaz,Symmetry,AAS,.false.)
+  call lopsided(ex,X,Y,Z,gxz,gxz_rhs,betax,betay,betaz,Symmetry,ASA,.false.)
+  call lopsided(ex,X,Y,Z,gyy,gyy_rhs,betax,betay,betaz,Symmetry,SSS,.false.)
+  call lopsided(ex,X,Y,Z,gyz,gyz_rhs,betax,betay,betaz,Symmetry,SAA,.false.)
+  call lopsided(ex,X,Y,Z,gzz,gzz_rhs,betax,betay,betaz,Symmetry,SSS,.false.)
+#endif
 
-  call lopsided(ex,X,Y,Z,Axx,Axx_rhs,betax,betay,betaz,Symmetry,SSS)
-  call lopsided(ex,X,Y,Z,Axy,Axy_rhs,betax,betay,betaz,Symmetry,AAS)
-  call lopsided(ex,X,Y,Z,Axz,Axz_rhs,betax,betay,betaz,Symmetry,ASA)
-  call lopsided(ex,X,Y,Z,Ayy,Ayy_rhs,betax,betay,betaz,Symmetry,SSS)
-  call lopsided(ex,X,Y,Z,Ayz,Ayz_rhs,betax,betay,betaz,Symmetry,SAA)
-  call lopsided(ex,X,Y,Z,Azz,Azz_rhs,betax,betay,betaz,Symmetry,SSS)
+#ifdef AMSS_ENABLE_LOPSIDEDIFF_BATCH
+  call lopsided2(ex,X,Y,Z,Axx,Axx_rhs,Axy,Axy_rhs,betax,betay,betaz,Symmetry,SSS,AAS)
+  call lopsided2(ex,X,Y,Z,Axz,Axz_rhs,Ayy,Ayy_rhs,betax,betay,betaz,Symmetry,ASA,SSS)
+  call lopsided2(ex,X,Y,Z,Ayz,Ayz_rhs,Azz,Azz_rhs,betax,betay,betaz,Symmetry,SAA,SSS)
+#else
+  call lopsided(ex,X,Y,Z,Axx,Axx_rhs,betax,betay,betaz,Symmetry,SSS,.false.)
+  call lopsided(ex,X,Y,Z,Axy,Axy_rhs,betax,betay,betaz,Symmetry,AAS,.false.)
+  call lopsided(ex,X,Y,Z,Axz,Axz_rhs,betax,betay,betaz,Symmetry,ASA,.false.)
+  call lopsided(ex,X,Y,Z,Ayy,Ayy_rhs,betax,betay,betaz,Symmetry,SSS,.false.)
+  call lopsided(ex,X,Y,Z,Ayz,Ayz_rhs,betax,betay,betaz,Symmetry,SAA,.false.)
+  call lopsided(ex,X,Y,Z,Azz,Azz_rhs,betax,betay,betaz,Symmetry,SSS,.false.)
+#endif
 
-  call lopsided(ex,X,Y,Z,chi,chi_rhs,betax,betay,betaz,Symmetry,SSS)
-  call lopsided(ex,X,Y,Z,trK,trK_rhs,betax,betay,betaz,Symmetry,SSS)
+  call lopsided(ex,X,Y,Z,chi,chi_rhs,betax,betay,betaz,Symmetry,SSS,.false.)
+  call lopsided(ex,X,Y,Z,trK,trK_rhs,betax,betay,betaz,Symmetry,SSS,.false.)
 
-  call lopsided(ex,X,Y,Z,Gamx,Gamx_rhs,betax,betay,betaz,Symmetry,ASS)
-  call lopsided(ex,X,Y,Z,Gamy,Gamy_rhs,betax,betay,betaz,Symmetry,SAS)
-  call lopsided(ex,X,Y,Z,Gamz,Gamz_rhs,betax,betay,betaz,Symmetry,SSA)
+  call lopsided(ex,X,Y,Z,Gamx,Gamx_rhs,betax,betay,betaz,Symmetry,ASS,.false.)
+  call lopsided(ex,X,Y,Z,Gamy,Gamy_rhs,betax,betay,betaz,Symmetry,SAS,.false.)
+  call lopsided(ex,X,Y,Z,Gamz,Gamz_rhs,betax,betay,betaz,Symmetry,SSA,.false.)
 !!
-  call lopsided(ex,X,Y,Z,Lap,Lap_rhs,betax,betay,betaz,Symmetry,SSS)
+  call lopsided(ex,X,Y,Z,Lap,Lap_rhs,betax,betay,betaz,Symmetry,SSS,.false.)
 
-  call lopsided(ex,X,Y,Z,betax,betax_rhs,betax,betay,betaz,Symmetry,ASS)
-  call lopsided(ex,X,Y,Z,betay,betay_rhs,betax,betay,betaz,Symmetry,SAS)
-  call lopsided(ex,X,Y,Z,betaz,betaz_rhs,betax,betay,betaz,Symmetry,SSA)
+  call lopsided(ex,X,Y,Z,betax,betax_rhs,betax,betay,betaz,Symmetry,ASS,.false.)
+  call lopsided(ex,X,Y,Z,betay,betay_rhs,betax,betay,betaz,Symmetry,SAS,.false.)
+  call lopsided(ex,X,Y,Z,betaz,betaz_rhs,betax,betay,betaz,Symmetry,SSA,.false.)
 
-  call lopsided(ex,X,Y,Z,dtSfx,dtSfx_rhs,betax,betay,betaz,Symmetry,ASS)
-  call lopsided(ex,X,Y,Z,dtSfy,dtSfy_rhs,betax,betay,betaz,Symmetry,SAS)
-  call lopsided(ex,X,Y,Z,dtSfz,dtSfz_rhs,betax,betay,betaz,Symmetry,SSA)
+  call lopsided(ex,X,Y,Z,dtSfx,dtSfx_rhs,betax,betay,betaz,Symmetry,ASS,.false.)
+  call lopsided(ex,X,Y,Z,dtSfy,dtSfy_rhs,betax,betay,betaz,Symmetry,SAS,.false.)
+  call lopsided(ex,X,Y,Z,dtSfz,dtSfz_rhs,betax,betay,betaz,Symmetry,SSA,.false.)
 
   if(eps>0)then 
 ! usual Kreiss-Oliger dissipation      

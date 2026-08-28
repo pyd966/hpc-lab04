@@ -33,6 +33,7 @@
   real*8,dimension(-1:ex(1),-1:ex(2),-1:ex(3))   :: fh
   real*8, dimension(3) :: SoA
   integer :: imin,jmin,kmin,imax,jmax,kmax,i,j,k
+  integer :: ibegin,iend,jbegin,jend,kbegin,kend
   real*8 :: d12dx,d12dy,d12dz,d2dx,d2dy,d2dz
   integer, parameter :: NO_SYMM = 0, EQ_SYMM = 1, OCTANT = 2
   real*8,  parameter :: ZEO=0.d0,ONE=1.d0, F60=6.d1
@@ -68,10 +69,86 @@
   d2dy = ONE/TWO/dY
   d2dz = ONE/TWO/dZ
 
+#ifdef AMSS_FDERIVS_BOUNDARY_INIT
+! Only uncovered boundary planes need a defined zero.
+  fx(ex(1),:,:) = ZEO
+  fy(ex(1),:,:) = ZEO
+  fz(ex(1),:,:) = ZEO
+  fx(:,ex(2),:) = ZEO
+  fy(:,ex(2),:) = ZEO
+  fz(:,ex(2),:) = ZEO
+  fx(:,:,ex(3)) = ZEO
+  fy(:,:,ex(3)) = ZEO
+  fz(:,:,ex(3)) = ZEO
+  if (imin == 1) then
+    fx(1,:,:) = ZEO
+    fy(1,:,:) = ZEO
+    fz(1,:,:) = ZEO
+  endif
+  if (jmin == 1) then
+    fx(:,1,:) = ZEO
+    fy(:,1,:) = ZEO
+    fz(:,1,:) = ZEO
+  endif
+  if (kmin == 1) then
+    fx(:,:,1) = ZEO
+    fy(:,:,1) = ZEO
+    fz(:,:,1) = ZEO
+  endif
+#else
   fx = ZEO
   fy = ZEO
   fz = ZEO
+#endif
 
+#ifdef AMSS_FDERIVS_SIMD
+! The active BAM-comparison path uses one common order in all directions.
+! Split its fourth-order interior from the second-order boundary shell so the
+! contiguous i loop has no control flow and can be vectorized.
+  ibegin = max(1, imin+2)
+  iend   = min(ex(1)-1, imax-2)
+  jbegin = max(1, jmin+2)
+  jend   = min(ex(2)-1, jmax-2)
+  kbegin = max(1, kmin+2)
+  kend   = min(ex(3)-1, kmax-2)
+
+  if (ibegin <= iend .and. jbegin <= jend .and. kbegin <= kend) then
+    do k=kbegin,kend
+    do j=jbegin,jend
+!$omp simd
+    do i=ibegin,iend
+      fx(i,j,k) = d12dx*(fh(i-2,j,k)-EIT*fh(i-1,j,k) &
+                         +EIT*fh(i+1,j,k)-fh(i+2,j,k))
+      fy(i,j,k) = d12dy*(fh(i,j-2,k)-EIT*fh(i,j-1,k) &
+                         +EIT*fh(i,j+1,k)-fh(i,j+2,k))
+      fz(i,j,k) = d12dz*(fh(i,j,k-2)-EIT*fh(i,j,k-1) &
+                         +EIT*fh(i,j,k+1)-fh(i,j,k+2))
+    enddo
+    enddo
+    enddo
+  endif
+
+! Retain the original second-order rule and symmetry-aware ghost bounds on
+! the shell. Arrays were initialized to zero, matching the original result
+! for shell points that do not satisfy the second-order condition.
+  do k=1,ex(3)-1
+  do j=1,ex(2)-1
+  do i=1,ex(1)-1
+    if (.not. (i >= ibegin .and. i <= iend .and. &
+               j >= jbegin .and. j <= jend .and. &
+               k >= kbegin .and. k <= kend)) then
+      if(i+1 <= imax .and. i-1 >= imin .and. &
+         j+1 <= jmax .and. j-1 >= jmin .and. &
+         k+1 <= kmax .and. k-1 >= kmin) then
+        fx(i,j,k) = d2dx*(-fh(i-1,j,k)+fh(i+1,j,k))
+        fy(i,j,k) = d2dy*(-fh(i,j-1,k)+fh(i,j+1,k))
+        fz(i,j,k) = d2dz*(-fh(i,j,k-1)+fh(i,j,k+1))
+      endif
+    endif
+  enddo
+  enddo
+  enddo
+#else
   do k=1,ex(3)-1
   do j=1,ex(2)-1
   do i=1,ex(1)-1
@@ -173,6 +250,7 @@
   enddo
   enddo
   enddo
+#endif
 
   return
 
@@ -424,6 +502,7 @@
   real*8,dimension(-1:ex(1),-1:ex(2),-1:ex(3))   :: fh
   real*8, dimension(3) :: SoA
   integer :: imin,jmin,kmin,imax,jmax,kmax,i,j,k
+  integer :: ibegin,iend,jbegin,jend,kbegin,kend
   real*8  :: Sdxdx,Sdydy,Sdzdz,Fdxdx,Fdydy,Fdzdz
   real*8  :: Sdxdy,Sdxdz,Sdydz,Fdxdy,Fdxdz,Fdydz
   integer, parameter :: NO_SYMM = 0, EQ_SYMM = 1, OCTANT = 2
@@ -469,13 +548,125 @@
   Fdxdz = F1o144 /( dX * dZ )
   Fdydz = F1o144 /( dY * dZ )
 
+#ifdef AMSS_FDDERIVS_BOUNDARY_INIT
+! Only uncovered boundary planes need a defined zero.
+  fxx(ex(1),:,:) = ZEO
+  fyy(ex(1),:,:) = ZEO
+  fzz(ex(1),:,:) = ZEO
+  fxy(ex(1),:,:) = ZEO
+  fxz(ex(1),:,:) = ZEO
+  fyz(ex(1),:,:) = ZEO
+  fxx(:,ex(2),:) = ZEO
+  fyy(:,ex(2),:) = ZEO
+  fzz(:,ex(2),:) = ZEO
+  fxy(:,ex(2),:) = ZEO
+  fxz(:,ex(2),:) = ZEO
+  fyz(:,ex(2),:) = ZEO
+  fxx(:,:,ex(3)) = ZEO
+  fyy(:,:,ex(3)) = ZEO
+  fzz(:,:,ex(3)) = ZEO
+  fxy(:,:,ex(3)) = ZEO
+  fxz(:,:,ex(3)) = ZEO
+  fyz(:,:,ex(3)) = ZEO
+  if (imin == 1) then
+    fxx(1,:,:) = ZEO
+    fyy(1,:,:) = ZEO
+    fzz(1,:,:) = ZEO
+    fxy(1,:,:) = ZEO
+    fxz(1,:,:) = ZEO
+    fyz(1,:,:) = ZEO
+  endif
+  if (jmin == 1) then
+    fxx(:,1,:) = ZEO
+    fyy(:,1,:) = ZEO
+    fzz(:,1,:) = ZEO
+    fxy(:,1,:) = ZEO
+    fxz(:,1,:) = ZEO
+    fyz(:,1,:) = ZEO
+  endif
+  if (kmin == 1) then
+    fxx(:,:,1) = ZEO
+    fyy(:,:,1) = ZEO
+    fzz(:,:,1) = ZEO
+    fxy(:,:,1) = ZEO
+    fxz(:,:,1) = ZEO
+    fyz(:,:,1) = ZEO
+  endif
+#else
   fxx = ZEO
   fyy = ZEO
   fzz = ZEO
   fxy = ZEO
   fxz = ZEO
   fyz = ZEO
+#endif
 
+#ifdef AMSS_FDDERIVS_SIMD
+! The active (BAM comparison) path uses the fourth-order stencil only when
+! all three coordinates are at least two points away from a boundary.  Keep
+! that regular volume separate from the second-order boundary shell so the
+! innermost loop has no control flow for the compiler to vectorize around.
+  ibegin = max(1, imin+2)
+  iend   = min(ex(1)-1, imax-2)
+  jbegin = max(1, jmin+2)
+  jend   = min(ex(2)-1, jmax-2)
+  kbegin = max(1, kmin+2)
+  kend   = min(ex(3)-1, kmax-2)
+
+  if (ibegin <= iend .and. jbegin <= jend .and. kbegin <= kend) then
+    do k=kbegin,kend
+    do j=jbegin,jend
+!$omp simd
+    do i=ibegin,iend
+      fxx(i,j,k) = Fdxdx*(-fh(i-2,j,k)+F16*fh(i-1,j,k)-F30*fh(i,j,k) &
+                          -fh(i+2,j,k)+F16*fh(i+1,j,k))
+      fyy(i,j,k) = Fdydy*(-fh(i,j-2,k)+F16*fh(i,j-1,k)-F30*fh(i,j,k) &
+                          -fh(i,j+2,k)+F16*fh(i,j+1,k))
+      fzz(i,j,k) = Fdzdz*(-fh(i,j,k-2)+F16*fh(i,j,k-1)-F30*fh(i,j,k) &
+                          -fh(i,j,k+2)+F16*fh(i,j,k+1))
+      fxy(i,j,k) = Fdxdy*(     (fh(i-2,j-2,k)-F8*fh(i-1,j-2,k)+F8*fh(i+1,j-2,k)-fh(i+2,j-2,k))  &
+                          -F8 *(fh(i-2,j-1,k)-F8*fh(i-1,j-1,k)+F8*fh(i+1,j-1,k)-fh(i+2,j-1,k))  &
+                          +F8 *(fh(i-2,j+1,k)-F8*fh(i-1,j+1,k)+F8*fh(i+1,j+1,k)-fh(i+2,j+1,k))  &
+                          -    (fh(i-2,j+2,k)-F8*fh(i-1,j+2,k)+F8*fh(i+1,j+2,k)-fh(i+2,j+2,k)))
+      fxz(i,j,k) = Fdxdz*(     (fh(i-2,j,k-2)-F8*fh(i-1,j,k-2)+F8*fh(i+1,j,k-2)-fh(i+2,j,k-2))  &
+                          -F8 *(fh(i-2,j,k-1)-F8*fh(i-1,j,k-1)+F8*fh(i+1,j,k-1)-fh(i+2,j,k-1))  &
+                          +F8 *(fh(i-2,j,k+1)-F8*fh(i-1,j,k+1)+F8*fh(i+1,j,k+1)-fh(i+2,j,k+1))  &
+                          -    (fh(i-2,j,k+2)-F8*fh(i-1,j,k+2)+F8*fh(i+1,j,k+2)-fh(i+2,j,k+2)))
+      fyz(i,j,k) = Fdydz*(     (fh(i,j-2,k-2)-F8*fh(i,j-1,k-2)+F8*fh(i,j+1,k-2)-fh(i,j+2,k-2))  &
+                          -F8 *(fh(i,j-2,k-1)-F8*fh(i,j-1,k-1)+F8*fh(i,j+1,k-1)-fh(i,j+2,k-1))  &
+                          +F8 *(fh(i,j-2,k+1)-F8*fh(i,j-1,k+1)+F8*fh(i,j+1,k+1)-fh(i,j+2,k+1))  &
+                          -    (fh(i,j-2,k+2)-F8*fh(i,j-1,k+2)+F8*fh(i,j+1,k+2)-fh(i,j+2,k+2)))
+    enddo
+    enddo
+    enddo
+  endif
+
+! The shell is small compared with the interior volume.  Retain the original
+! second-order condition here, including symmetry-aware ghost-cell bounds.
+  do k=1,ex(3)-1
+  do j=1,ex(2)-1
+  do i=1,ex(1)-1
+    if (.not. (i >= ibegin .and. i <= iend .and. &
+               j >= jbegin .and. j <= jend .and. &
+               k >= kbegin .and. k <= kend)) then
+      if(i+1 <= imax .and. i-1 >= imin .and. &
+         j+1 <= jmax .and. j-1 >= jmin .and. &
+         k+1 <= kmax .and. k-1 >= kmin) then
+        fxx(i,j,k) = Sdxdx*(fh(i-1,j,k)-TWO*fh(i,j,k)+fh(i+1,j,k))
+        fyy(i,j,k) = Sdydy*(fh(i,j-1,k)-TWO*fh(i,j,k)+fh(i,j+1,k))
+        fzz(i,j,k) = Sdzdz*(fh(i,j,k-1)-TWO*fh(i,j,k)+fh(i,j,k+1))
+        fxy(i,j,k) = Sdxdy*(fh(i-1,j-1,k)-fh(i+1,j-1,k) &
+                            -fh(i-1,j+1,k)+fh(i+1,j+1,k))
+        fxz(i,j,k) = Sdxdz*(fh(i-1,j,k-1)-fh(i+1,j,k-1) &
+                            -fh(i-1,j,k+1)+fh(i+1,j,k+1))
+        fyz(i,j,k) = Sdydz*(fh(i,j-1,k-1)-fh(i,j+1,k-1) &
+                            -fh(i,j-1,k+1)+fh(i,j+1,k+1))
+      endif
+    endif
+  enddo
+  enddo
+  enddo
+#else
   do k=1,ex(3)-1
   do j=1,ex(2)-1
   do i=1,ex(1)-1
@@ -597,6 +788,7 @@
    enddo
    enddo
    enddo
+#endif
 
   return
 
@@ -1015,3 +1207,101 @@
 
   end subroutine fddyz
 
+
+! Pairwise fderivs variant used by the P6 batch experiment.  It keeps the
+! original BAM comparison stencils and boundary rules, but traverses two
+! independent input/output fields in one grid walk.
+  subroutine fderivs2(ex,f1,fx1,fy1,fz1,f2,fx2,fy2,fz2, &
+                      X,Y,Z,SYM11,SYM12,SYM13,SYM21,SYM22,SYM23, &
+                      symmetry,onoff)
+  implicit none
+  integer, intent(in) :: ex(1:3),symmetry,onoff
+  real*8, dimension(ex(1),ex(2),ex(3)), intent(in) :: f1,f2
+  real*8, dimension(ex(1),ex(2),ex(3)), intent(out) :: fx1,fy1,fz1
+  real*8, dimension(ex(1),ex(2),ex(3)), intent(out) :: fx2,fy2,fz2
+  real*8, intent(in) :: X(ex(1)),Y(ex(2)),Z(ex(3))
+  real*8, intent(in) :: SYM11,SYM12,SYM13,SYM21,SYM22,SYM23
+  real*8 :: dX,dY,dZ,d12dx,d12dy,d12dz,d2dx,d2dy,d2dz
+  real*8, dimension(-1:ex(1),-1:ex(2),-1:ex(3)) :: fh1,fh2
+  real*8, dimension(3) :: SoA1,SoA2
+  integer :: imin,jmin,kmin,imax,jmax,kmax,i,j,k
+  integer :: ibegin,iend,jbegin,jend,kbegin,kend
+  real*8, parameter :: ZEO=0.d0,ONE=1.d0,TWO=2.d0,EIT=8.d0,F12=1.2d1
+
+  dX=X(2)-X(1)
+  dY=Y(2)-Y(1)
+  dZ=Z(2)-Z(1)
+  imax=ex(1)
+  jmax=ex(2)
+  kmax=ex(3)
+  imin=1
+  jmin=1
+  kmin=1
+  if (symmetry > 0 .and. dabs(Z(1)) < dZ) kmin=-1
+  if (symmetry > 1 .and. dabs(X(1)) < dX) imin=-1
+  if (symmetry > 1 .and. dabs(Y(1)) < dY) jmin=-1
+  SoA1(1)=SYM11
+  SoA1(2)=SYM12
+  SoA1(3)=SYM13
+  SoA2(1)=SYM21
+  SoA2(2)=SYM22
+  SoA2(3)=SYM23
+  call symmetry_bd(2,ex,f1,fh1,SoA1)
+  call symmetry_bd(2,ex,f2,fh2,SoA2)
+  d12dx=ONE/F12/dX
+  d12dy=ONE/F12/dY
+  d12dz=ONE/F12/dZ
+  d2dx=ONE/TWO/dX
+  d2dy=ONE/TWO/dY
+  d2dz=ONE/TWO/dZ
+  fx1=ZEO
+  fy1=ZEO
+  fz1=ZEO
+  fx2=ZEO
+  fy2=ZEO
+  fz2=ZEO
+
+  ibegin=max(1,imin+2)
+  iend=min(ex(1)-1,imax-2)
+  jbegin=max(1,jmin+2)
+  jend=min(ex(2)-1,jmax-2)
+  kbegin=max(1,kmin+2)
+  kend=min(ex(3)-1,kmax-2)
+  if (ibegin <= iend .and. jbegin <= jend .and. kbegin <= kend) then
+    do k=kbegin,kend
+    do j=jbegin,jend
+!$omp simd
+    do i=ibegin,iend
+      fx1(i,j,k)=d12dx*(fh1(i-2,j,k)-EIT*fh1(i-1,j,k)+EIT*fh1(i+1,j,k)-fh1(i+2,j,k))
+      fy1(i,j,k)=d12dy*(fh1(i,j-2,k)-EIT*fh1(i,j-1,k)+EIT*fh1(i,j+1,k)-fh1(i,j+2,k))
+      fz1(i,j,k)=d12dz*(fh1(i,j,k-2)-EIT*fh1(i,j,k-1)+EIT*fh1(i,j,k+1)-fh1(i,j,k+2))
+      fx2(i,j,k)=d12dx*(fh2(i-2,j,k)-EIT*fh2(i-1,j,k)+EIT*fh2(i+1,j,k)-fh2(i+2,j,k))
+      fy2(i,j,k)=d12dy*(fh2(i,j-2,k)-EIT*fh2(i,j-1,k)+EIT*fh2(i,j+1,k)-fh2(i,j+2,k))
+      fz2(i,j,k)=d12dz*(fh2(i,j,k-2)-EIT*fh2(i,j,k-1)+EIT*fh2(i,j,k+1)-fh2(i,j,k+2))
+    enddo
+    enddo
+    enddo
+  endif
+
+  do k=1,ex(3)-1
+  do j=1,ex(2)-1
+  do i=1,ex(1)-1
+    if (.not. (i >= ibegin .and. i <= iend .and. &
+               j >= jbegin .and. j <= jend .and. &
+               k >= kbegin .and. k <= kend)) then
+      if (i+1 <= imax .and. i-1 >= imin .and. &
+          j+1 <= jmax .and. j-1 >= jmin .and. &
+          k+1 <= kmax .and. k-1 >= kmin) then
+        fx1(i,j,k)=d2dx*(-fh1(i-1,j,k)+fh1(i+1,j,k))
+        fy1(i,j,k)=d2dy*(-fh1(i,j-1,k)+fh1(i,j+1,k))
+        fz1(i,j,k)=d2dz*(-fh1(i,j,k-1)+fh1(i,j,k+1))
+        fx2(i,j,k)=d2dx*(-fh2(i-1,j,k)+fh2(i+1,j,k))
+        fy2(i,j,k)=d2dy*(-fh2(i,j-1,k)+fh2(i,j+1,k))
+        fz2(i,j,k)=d2dz*(-fh2(i,j,k-1)+fh2(i,j,k+1))
+      endif
+    endif
+  enddo
+  enddo
+  enddo
+  return
+  end subroutine fderivs2

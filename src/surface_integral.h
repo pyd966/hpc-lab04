@@ -26,6 +26,11 @@ private:
 	double *nx_g, *ny_g, *nz_g; // global list of unit normals
 	int myrank, cpusize;
 
+#if defined(AMSS_OMP_ONLY) && !defined(USE_GPU)
+	// Opaque CPU-only cache for sphere interpolation plans and integration bases.
+	void *omp_analysis_cache;
+#endif
+
 #ifdef USE_GPU
 	// Shadow variables for surface integral (GPU)
 	cudaStream_t stream;

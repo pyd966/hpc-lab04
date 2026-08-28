@@ -80,8 +80,8 @@ inspect the architectures embedded in a GPU executable.
 This builds:
 
 - `build/ABE`
-- `build/ABEGPU` (only when `AMSS_ENABLE_GPU=ON`, which is the default on
-  the amd64 image and `OFF` on the arm64 image)
+- `build/ABEGPU` when a GPU allocation is detected or
+  `AMSS_ENABLE_GPU=ON` is requested explicitly
 - `build/TwoPunctureABE`
 
 For a faster debug build:
@@ -95,6 +95,13 @@ For a faster debug build:
 ```bash
 ./run.sh
 ```
+
+`compile.sh` and `run.sh` automatically select the track from the allocated
+GPU and the configured build target. The CPU path detects physical cores in
+the scheduler cpuset, binds OpenMP threads to cores, and rebuilds an
+incompatible or missing CPU build. Dedicated GPU scripts still set
+`AMSS_EXECUTION_MODE=gpu` explicitly; interactive runs can override automatic
+selection with `AMSS_EXECUTION_MODE=cpu` or `gpu`.
 
 Optional TwoPuncture cache:
 

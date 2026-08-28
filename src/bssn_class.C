@@ -7,6 +7,8 @@
 #include <iostream>
 #include <vector>
 #include <utility>
+#include <cerrno>
+#include <cstdlib>
 using namespace std;
 
 #include <time.h>
@@ -33,6 +35,197 @@ using namespace std;
 #include "perf.h"
 
 #include "derivatives.h"
+
+namespace
+{
+int omp_threads_for_level(int lev, int first_moving_level)
+{
+#ifdef _OPENMP
+  const int maximum = omp_get_max_threads();
+  const char *name =
+      lev < first_moving_level
+          ? "AMSS_OMP_STATIC_THREADS"
+          : "AMSS_OMP_MOVING_THREADS";
+  const char *text = getenv(name);
+  if (text == 0 || *text == 0)
+    return maximum;
+
+  char *end = 0;
+  errno = 0;
+  long target = strtol(text, &end, 10);
+  if (errno || end == text || *end || target < 1 || target > maximum)
+  {
+    cerr << name << " must be an integer in [1, " << maximum
+         << "]: " << text << endl;
+    MPI_Abort(MPI_COMM_WORLD, 1);
+  }
+  return static_cast<int>(target);
+#else
+  (void)lev;
+  (void)first_moving_level;
+  return 1;
+#endif
+}
+
+class OmpThreadScope
+{
+public:
+  explicit OmpThreadScope(int threads)
+  {
+#ifdef _OPENMP
+    previous_ = omp_get_max_threads();
+    if (threads != previous_)
+      omp_set_num_threads(threads);
+#else
+    (void)threads;
+#endif
+  }
+
+  ~OmpThreadScope()
+  {
+#ifdef _OPENMP
+    if (omp_get_max_threads() != previous_)
+      omp_set_num_threads(previous_);
+#endif
+  }
+
+private:
+#ifdef _OPENMP
+  int previous_;
+#endif
+};
+
+#ifdef AMSS_OMP_DIAGNOSTICS
+const int OMP_DIAG_MAX_LEVELS = 64;
+
+struct OmpLevelDiagnostics
+{
+  unsigned long step_calls;
+  unsigned long phase_calls;
+  unsigned long block_tasks;
+  unsigned long sync_calls;
+  unsigned long transfer_calls;
+  unsigned long regrid_calls;
+  double step_wall;
+  double phase_wall;
+  double phase_capacity;
+  double longest_work;
+  double enforce_work;
+  double rhs_work;
+  double update_work;
+  double sync_wall;
+  double transfer_wall;
+  double regrid_wall;
+
+  OmpLevelDiagnostics()
+      : step_calls(0), phase_calls(0), block_tasks(0), sync_calls(0),
+        transfer_calls(0), regrid_calls(0), step_wall(0), phase_wall(0), phase_capacity(0),
+        longest_work(0), enforce_work(0), rhs_work(0), update_work(0), sync_wall(0),
+        transfer_wall(0), regrid_wall(0)
+  {
+  }
+};
+
+OmpLevelDiagnostics omp_level_diagnostics[OMP_DIAG_MAX_LEVELS];
+unsigned long omp_constraint_calls = 0;
+double omp_constraint_wall = 0;
+unsigned long omp_initial_interp_constraint_calls = 0;
+double omp_initial_interp_constraint_wall = 0;
+unsigned long omp_compute_constraint_calls = 0;
+double omp_compute_constraint_wall = 0;
+
+void omp_record_block_phase(int lev, int threads, double wall,
+                            const vector<double> &enforce,
+                            const vector<double> &rhs,
+                            const vector<double> &update)
+{
+  if (lev < 0 || lev >= OMP_DIAG_MAX_LEVELS)
+    return;
+  OmpLevelDiagnostics &diag = omp_level_diagnostics[lev];
+  ++diag.phase_calls;
+  diag.block_tasks += enforce.size();
+  diag.phase_wall += wall;
+  diag.phase_capacity += wall * threads;
+  double longest = 0;
+  for (size_t block = 0; block < enforce.size(); ++block)
+  {
+    const double block_work = enforce[block] + rhs[block] + update[block];
+    if (block_work > longest)
+      longest = block_work;
+    diag.enforce_work += enforce[block];
+    diag.rhs_work += rhs[block];
+    diag.update_work += update[block];
+  }
+  diag.longest_work += longest;
+}
+
+void omp_record_sync(int lev, double wall)
+{
+  if (lev < 0 || lev >= OMP_DIAG_MAX_LEVELS)
+    return;
+  ++omp_level_diagnostics[lev].sync_calls;
+  omp_level_diagnostics[lev].sync_wall += wall;
+}
+
+void omp_record_transfer(int lev, double wall)
+{
+  if (lev < 0 || lev >= OMP_DIAG_MAX_LEVELS)
+    return;
+  ++omp_level_diagnostics[lev].transfer_calls;
+  omp_level_diagnostics[lev].transfer_wall += wall;
+}
+
+void omp_record_regrid(int lev, double wall)
+{
+  if (lev < 0 || lev >= OMP_DIAG_MAX_LEVELS)
+    return;
+  ++omp_level_diagnostics[lev].regrid_calls;
+  omp_level_diagnostics[lev].regrid_wall += wall;
+}
+
+void omp_dump_diagnostics(int levels)
+{
+  cout << "OMP_DIAG level step_calls phase_calls block_tasks step_wall "
+          "phase_wall active_work capacity utilization longest_work balance "
+          "enforce rhs update "
+          "sync_calls sync_wall transfer_calls transfer_wall regrid_calls regrid_wall"
+       << endl;
+  for (int lev = 0; lev < levels && lev < OMP_DIAG_MAX_LEVELS; ++lev)
+  {
+    const OmpLevelDiagnostics &diag = omp_level_diagnostics[lev];
+    const double active = diag.enforce_work + diag.rhs_work + diag.update_work;
+    const double utilization = diag.phase_capacity > 0
+                                   ? active / diag.phase_capacity
+                                   : 0;
+    const double balance_capacity = diag.phase_wall > 0
+                                        ? diag.longest_work *
+                                              (diag.phase_capacity / diag.phase_wall)
+                                        : 0;
+    const double balance = balance_capacity > 0
+                               ? active / balance_capacity
+                               : 0;
+    cout << "OMP_DIAG " << lev << " " << diag.step_calls << " "
+         << diag.phase_calls << " " << diag.block_tasks << " "
+         << diag.step_wall << " " << diag.phase_wall << " " << active << " "
+         << diag.phase_capacity << " " << utilization << " "
+         << diag.longest_work << " " << balance << " "
+         << diag.enforce_work << " " << diag.rhs_work << " "
+         << diag.update_work << " " << diag.sync_calls << " "
+         << diag.sync_wall << " " << diag.transfer_calls << " "
+         << diag.transfer_wall << " " << diag.regrid_calls << " "
+         << diag.regrid_wall << endl;
+  }
+  cout << "OMP_DIAG_CONSTRAINT calls " << omp_constraint_calls
+       << " wall " << omp_constraint_wall << endl;
+  cout << "OMP_DIAG_INITIAL_INTERP_CONSTRAINT calls "
+       << omp_initial_interp_constraint_calls << " wall "
+       << omp_initial_interp_constraint_wall << endl;
+  cout << "OMP_DIAG_COMPUTE_CONSTRAINT calls "
+       << omp_compute_constraint_calls << " wall "
+       << omp_compute_constraint_wall << endl;
+}
+#endif
+}
 
 //================================================================================================
 
@@ -1560,6 +1753,7 @@ void bssn_class::Evolve(int Steps)
 
   for (int ncount = 1; ncount < Steps + 1; ncount++)
   {
+    const double step_wall_start = MPI_Wtime();
     // special for large mass ratio consideration
     //     if(fabs(Porg0[0][0]-Porg0[1][0])+fabs(Porg0[0][1]-Porg0[1][1])+fabs(Porg0[0][2]-Porg0[1][2])<1e-6) 
     //     { GH->levels=GH->movls; }
@@ -1570,7 +1764,14 @@ void bssn_class::Evolve(int Steps)
 
     // misc::tillherecheck("before Constraint_Out");
 
+#ifdef AMSS_OMP_DIAGNOSTICS
+    const double omp_constraint_start = omp_get_wtime();
+#endif
     Constraint_Out(); // this will affect the Dump_List
+#ifdef AMSS_OMP_DIAGNOSTICS
+    ++omp_constraint_calls;
+    omp_constraint_wall += omp_get_wtime() - omp_constraint_start;
+#endif
 
     LastDump += dT_mon;
     Last2dDump += dT_mon;
@@ -1616,6 +1817,9 @@ void bssn_class::Evolve(int Steps)
       cout << " Timestep # " << ncount << ": integrating to time: " << PhysTime << "   "
            << " Computer used " << (double)(curr_clock - prev_clock) / ((double)CLOCKS_PER_SEC) 
            << " seconds! " << endl;
+      cout << " AMSS_STEP_TIMING step=" << ncount
+           << " physical_time=" << PhysTime
+           << " wall_seconds=" << MPI_Wtime() - step_wall_start << endl;
       // cout << endl;
     }
 
@@ -1693,6 +1897,9 @@ void bssn_class::Evolve(int Steps)
       CheckPoint->write_bssn(LastDump, Last2dDump, LastAnas);
     }
   }
+#ifdef AMSS_OMP_DIAGNOSTICS
+  omp_dump_diagnostics(GH->levels);
+#endif
 }
 
 //================================================================================================
@@ -1737,7 +1944,13 @@ void bssn_class::RecursiveStep(int lev)
     //
     // till here the PhysTime has updated dT_lev
     //  if(myrank==0) cout<<"level now = "<<lev<<", "<<fgt(PhysTime-dT_lev,StartTime,dT_lev/2)<<endl;
+#ifdef AMSS_OMP_DIAGNOSTICS
+    const double omp_transfer_start = omp_get_wtime();
+#endif
     RestrictProlong(lev, YN, fgt(PhysTime - dT_lev, StartTime, dT_lev / 2), StateList, OldStateList, SynchList_cor);
+#ifdef AMSS_OMP_DIAGNOSTICS
+    omp_record_transfer(lev, omp_get_wtime() - omp_transfer_start);
+#endif
     // RestrictProlong(lev,YN,false,StateList,OldStateList,SynchList_cor);
 
 
@@ -1745,9 +1958,15 @@ void bssn_class::RecursiveStep(int lev)
   }
 
 
+#ifdef AMSS_OMP_DIAGNOSTICS
+  const double omp_regrid_start = omp_get_wtime();
+#endif
   GH->Regrid_Onelevel(lev, Symmetry, BH_num, Porgbr, Porg0,
                       SynchList_cor, OldStateList, StateList, SynchList_pre,
                       fgt(PhysTime - dT_lev, StartTime, dT_lev / 2), ErrorMonitor);
+#ifdef AMSS_OMP_DIAGNOSTICS
+  omp_record_regrid(lev, omp_get_wtime() - omp_regrid_start);
+#endif
 }
 
 //================================================================================================
@@ -1776,6 +1995,11 @@ void bssn_class::RecursiveStep(int lev)
 //================================================================================================
 void bssn_class::Step(int lev, int YN)
 {
+  OmpThreadScope omp_thread_scope(
+      omp_threads_for_level(lev, GH->movls));
+#ifdef AMSS_OMP_DIAGNOSTICS
+  const double omp_step_start = omp_get_wtime();
+#endif
   setpbh(BH_num, Porg0, Mass, BH_num_input);
 
   double dT_lev = dT * pow(0.5, Mymax(lev, trfls));
@@ -1824,7 +2048,7 @@ void bssn_class::Step(int lev, int YN)
   if (lev < GH->movls)
     ndeps = numepsb;
   double TRK4 = PhysTime;
-  int iter_count = 0; // count RK4 substeps
+  int predictor_iter = 0;
   int pre = 0, cor = 1;
   int ERROR = 0;
 
@@ -1845,16 +2069,37 @@ void bssn_class::Step(int lev, int YN)
   MyList<Patch> *Pp = 0;
 
   // Predictor
-  #pragma omp parallel for schedule(static) if (omp_blocks.size() > 1)
+#ifdef AMSS_OMP_DIAGNOSTICS
+  vector<double> omp_enforce_times(omp_blocks.size(), 0);
+  vector<double> omp_rhs_times(omp_blocks.size(), 0);
+  vector<double> omp_update_times(omp_blocks.size(), 0);
+  double omp_phase_start = omp_get_wtime();
+  double omp_sync_start = 0;
+  const int omp_phase_threads = omp_get_max_threads();
+#endif
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+  #pragma omp parallel shared(ERROR, TRK4)
+  {
+  #pragma omp for schedule(runtime)
+#else
+  #pragma omp parallel for schedule(runtime) if (omp_blocks.size() > 1) reduction(|:ERROR)
+#endif
   for (int block_index = 0; block_index < static_cast<int>(omp_blocks.size()); ++block_index)
   {
     Patch *patch = omp_blocks[block_index].first;
     Block *cg = omp_blocks[block_index].second;
+#ifdef AMSS_OMP_DIAGNOSTICS
+    double omp_component_start = omp_get_wtime();
+#endif
         f_enforce_ga(cg->shape,
                      cg->fgfs[gxx0->sgfn], cg->fgfs[gxy0->sgfn], cg->fgfs[gxz0->sgfn], 
                      cg->fgfs[gyy0->sgfn], cg->fgfs[gyz0->sgfn], cg->fgfs[gzz0->sgfn],
                      cg->fgfs[Axx0->sgfn], cg->fgfs[Axy0->sgfn], cg->fgfs[Axz0->sgfn], 
                      cg->fgfs[Ayy0->sgfn], cg->fgfs[Ayz0->sgfn], cg->fgfs[Azz0->sgfn]);
+#ifdef AMSS_OMP_DIAGNOSTICS
+        omp_enforce_times[block_index] = omp_get_wtime() - omp_component_start;
+        omp_component_start = omp_get_wtime();
+#endif
 
         if (f_compute_rhs_bssn(cg->shape, TRK4, cg->X[0], cg->X[1], cg->X[2],
                                cg->fgfs[phi0->sgfn], cg->fgfs[trK0->sgfn],
@@ -1899,9 +2144,16 @@ void bssn_class::Step(int lev, int YN)
                  << cg->bbox[0] << ":" << cg->bbox[3] << ","
                  << cg->bbox[1] << ":" << cg->bbox[4] << ","
                  << cg->bbox[2] << ":" << cg->bbox[5] << ")" << endl;
-            ERROR = 1;
           }
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+          #pragma omp atomic write
+#endif
+          ERROR = 1;
         }
+#ifdef AMSS_OMP_DIAGNOSTICS
+        omp_rhs_times[block_index] = omp_get_wtime() - omp_component_start;
+        omp_component_start = omp_get_wtime();
+#endif
 
         // rk4 substep and boundary
         {
@@ -1921,7 +2173,7 @@ void bssn_class::Step(int lev, int YN)
                                cg->fgfs[varl0->data->sgfn], 
                                cg->fgfs[varl->data->sgfn], 
                                cg->fgfs[varlrhs->data->sgfn],
-                               iter_count);
+                               predictor_iter);
             if (lev > 0) // fix BD point
               f_sommerfeld_rout(cg->shape, cg->X[0], cg->X[1], cg->X[2],
                                 patch->bbox[0], patch->bbox[1], patch->bbox[2],
@@ -1940,12 +2192,33 @@ void bssn_class::Step(int lev, int YN)
           }
         }
         f_lowerboundset(cg->shape, cg->fgfs[phi->sgfn], chitiny);
+#ifdef AMSS_OMP_DIAGNOSTICS
+        omp_update_times[block_index] = omp_get_wtime() - omp_component_start;
+#endif
   }
+#ifdef AMSS_OMP_DIAGNOSTICS
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+  #pragma omp single
+  {
+#endif
+  omp_record_block_phase(lev, omp_phase_threads,
+                         omp_get_wtime() - omp_phase_start,
+                         omp_enforce_times, omp_rhs_times, omp_update_times);
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+  }
+#endif
+#endif
   // check error information
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+  #pragma omp single
+  {
+#endif
+#ifndef AMSS_OMP_ONLY
   {
     int erh = ERROR;
     MPI_Allreduce(&erh, &ERROR, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
   }
+#endif
   if (ERROR)
   {
     Parallel::Dump_Data(GH->PatL[lev], StateList, 0, PhysTime, dT_lev);
@@ -1956,26 +2229,85 @@ void bssn_class::Step(int lev, int YN)
       MPI_Abort(MPI_COMM_WORLD, 1);
     }
   }
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+  }
+  #pragma omp barrier
+#endif
 
 
+#ifdef AMSS_OMP_DIAGNOSTICS
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+  #pragma omp single
+  {
+#endif
+  omp_sync_start = omp_get_wtime();
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+  }
+#endif
+#endif
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+  Parallel::Sync_OMP_Team(GH->PatL[lev], SynchList_pre, Symmetry);
+#else
   Parallel::Sync(GH->PatL[lev], SynchList_pre, Symmetry);
+#endif
+#ifdef AMSS_OMP_DIAGNOSTICS
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+  #pragma omp single
+  {
+#endif
+  omp_record_sync(lev, omp_get_wtime() - omp_sync_start);
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+  }
+#endif
+#endif
 
   // corrector
-  for (iter_count = 1; iter_count < 4; iter_count++)
+  for (int rk_iter = 1; rk_iter < 4; rk_iter++)
   {
     // for RK4: t0, t0+dt/2, t0+dt/2, t0+dt;
-    if (iter_count == 1 || iter_count == 3)
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+    #pragma omp single
+    {
+#endif
+    if (rk_iter == 1 || rk_iter == 3)
       TRK4 += dT_lev / 2;
-    #pragma omp parallel for schedule(static) if (omp_blocks.size() > 1)
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+    }
+#endif
+#ifdef AMSS_OMP_DIAGNOSTICS
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+    #pragma omp single
+    {
+#endif
+    omp_enforce_times.assign(omp_blocks.size(), 0);
+    omp_rhs_times.assign(omp_blocks.size(), 0);
+    omp_update_times.assign(omp_blocks.size(), 0);
+    omp_phase_start = omp_get_wtime();
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+    }
+#endif
+#endif
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+    #pragma omp for schedule(runtime)
+#else
+    #pragma omp parallel for schedule(runtime) if (omp_blocks.size() > 1) reduction(|:ERROR)
+#endif
     for (int block_index = 0; block_index < static_cast<int>(omp_blocks.size()); ++block_index)
     {
       Patch *patch = omp_blocks[block_index].first;
       Block *cg = omp_blocks[block_index].second;
+#ifdef AMSS_OMP_DIAGNOSTICS
+      double omp_component_start = omp_get_wtime();
+#endif
           f_enforce_ga(cg->shape,
                        cg->fgfs[gxx->sgfn], cg->fgfs[gxy->sgfn], cg->fgfs[gxz->sgfn], 
                        cg->fgfs[gyy->sgfn], cg->fgfs[gyz->sgfn], cg->fgfs[gzz->sgfn],
                        cg->fgfs[Axx->sgfn], cg->fgfs[Axy->sgfn], cg->fgfs[Axz->sgfn], 
                        cg->fgfs[Ayy->sgfn], cg->fgfs[Ayz->sgfn], cg->fgfs[Azz->sgfn]);
+#ifdef AMSS_OMP_DIAGNOSTICS
+          omp_enforce_times[block_index] = omp_get_wtime() - omp_component_start;
+          omp_component_start = omp_get_wtime();
+#endif
 
           if (f_compute_rhs_bssn(cg->shape, TRK4, cg->X[0], cg->X[1], cg->X[2],
                                  cg->fgfs[phi->sgfn], cg->fgfs[trK->sgfn],
@@ -2020,9 +2352,16 @@ void bssn_class::Step(int lev, int YN)
                    << cg->bbox[0] << ":" << cg->bbox[3] << ","
                    << cg->bbox[1] << ":" << cg->bbox[4] << ","
                    << cg->bbox[2] << ":" << cg->bbox[5] << ")" << endl;
-              ERROR = 1;
             }
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+          #pragma omp atomic write
+#endif
+          ERROR = 1;
           }
+#ifdef AMSS_OMP_DIAGNOSTICS
+          omp_rhs_times[block_index] = omp_get_wtime() - omp_component_start;
+          omp_component_start = omp_get_wtime();
+#endif
           // rk4 substep and boundary
           {
             MyList<var> *varl0 = StateList, *varl = SynchList_pre, *varl1 = SynchList_cor, *varlrhs = RHSList; // we do not check the correspondence here
@@ -2039,7 +2378,7 @@ void bssn_class::Step(int lev, int YN)
                                  cg->fgfs[varl0->data->sgfn], 
                                  cg->fgfs[varl1->data->sgfn], 
                                  cg->fgfs[varlrhs->data->sgfn],
-                                 iter_count);
+                                 rk_iter);
 
               if (lev > 0) // fix BD point
                 f_sommerfeld_rout(cg->shape, cg->X[0], cg->X[1], cg->X[2],
@@ -2060,13 +2399,34 @@ void bssn_class::Step(int lev, int YN)
             }
           }
           f_lowerboundset(cg->shape, cg->fgfs[phi1->sgfn], chitiny);
+#ifdef AMSS_OMP_DIAGNOSTICS
+          omp_update_times[block_index] = omp_get_wtime() - omp_component_start;
+#endif
     }
+#ifdef AMSS_OMP_DIAGNOSTICS
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+    #pragma omp single
+    {
+#endif
+    omp_record_block_phase(lev, omp_phase_threads,
+                           omp_get_wtime() - omp_phase_start,
+                           omp_enforce_times, omp_rhs_times, omp_update_times);
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+    }
+#endif
+#endif
 
     // check error information
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+    #pragma omp single
+    {
+#endif
+#ifndef AMSS_OMP_ONLY
     {
       int erh = ERROR;
       MPI_Allreduce(&erh, &ERROR, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
     }
+#endif
 
     if (ERROR)
     {
@@ -2074,20 +2434,52 @@ void bssn_class::Step(int lev, int YN)
       if (myrank == 0)
       {
         if (ErrorMonitor->outfile)
-          ErrorMonitor->outfile << "find NaN in RK4 substep#" << iter_count 
+          ErrorMonitor->outfile << "find NaN in RK4 substep#" << rk_iter
                                 << " variables at t = " << PhysTime 
                                 << ", lev = " << lev << endl;
         MPI_Abort(MPI_COMM_WORLD, 1);
       }
     }
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+    }
+    #pragma omp barrier
+#endif
 
 
+#ifdef AMSS_OMP_DIAGNOSTICS
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+    #pragma omp single
+    {
+#endif
+    omp_sync_start = omp_get_wtime();
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+    }
+#endif
+#endif
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+    Parallel::Sync_OMP_Team(GH->PatL[lev], SynchList_cor, Symmetry);
+#else
     Parallel::Sync(GH->PatL[lev], SynchList_cor, Symmetry);
+#endif
+#ifdef AMSS_OMP_DIAGNOSTICS
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+    #pragma omp single
+    {
+#endif
+    omp_record_sync(lev, omp_get_wtime() - omp_sync_start);
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+    }
+#endif
+#endif
 
     // swap time level
-    if (iter_count < 3)
+    if (rk_iter < 3)
     {
-      #pragma omp parallel for schedule(static) if (omp_blocks.size() > 1)
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+      #pragma omp for schedule(runtime)
+#else
+      #pragma omp parallel for schedule(runtime) if (omp_blocks.size() > 1)
+#endif
       for (int block_index = 0; block_index < static_cast<int>(omp_blocks.size()); ++block_index)
       {
         Block *cg = omp_blocks[block_index].second;
@@ -2102,21 +2494,20 @@ void bssn_class::Step(int lev, int YN)
   //
   // OldStateList  old -----------
   // update
-  Pp = GH->PatL[lev];
-  while (Pp)
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+  #pragma omp for schedule(runtime)
+#else
+  #pragma omp parallel for schedule(runtime) if (omp_blocks.size() > 1)
+#endif
+  for (int block_index = 0; block_index < static_cast<int>(omp_blocks.size()); ++block_index)
   {
-    MyList<Block> *BP = Pp->data->blb;
-    while (BP)
-    {
-      Block *cg = BP->data;
-      cg->swapList(StateList, SynchList_cor, myrank);
-      cg->swapList(OldStateList, SynchList_cor, myrank);
-      if (BP == Pp->data->ble)
-        break;
-      BP = BP->next;
-    }
-    Pp = Pp->next;
+    Block *cg = omp_blocks[block_index].second;
+    cg->swapList(StateList, SynchList_cor, myrank);
+    cg->swapList(OldStateList, SynchList_cor, myrank);
   }
+#ifdef AMSS_OMP_PERSISTENT_TEAM
+  }
+#endif
   // for black hole position
   if (BH_num > 0 && lev == GH->levels - 1)
   {
@@ -2127,6 +2518,13 @@ void bssn_class::Step(int lev, int YN)
       Porg0[ithBH][2] = Porg1[ithBH][2];
     }
   }
+#ifdef AMSS_OMP_DIAGNOSTICS
+  if (lev >= 0 && lev < OMP_DIAG_MAX_LEVELS)
+  {
+    ++omp_level_diagnostics[lev].step_calls;
+    omp_level_diagnostics[lev].step_wall += omp_get_wtime() - omp_step_start;
+  }
+#endif
 }
 
 //================================================================================================
@@ -3009,22 +3407,41 @@ void bssn_class::Constraint_Out()
     // recompute least the constraint data lost for moved new grid
     for (int lev = 0; lev < GH->levels; lev++)
     {
+#if defined(AMSS_OMP_ONLY) && defined(AMSS_OMP_CONSTRAINT_PARALLEL)
+      OmpThreadScope omp_constraint_threads(
+          omp_threads_for_level(lev, GH->movls));
+#endif
       // make sure the data consistent for higher levels
       if (lev > 0) // if the constrait quantities can be reused from the step rhs calculation
       {
         double TRK4 = PhysTime;
         double ndeps = numepsb;
         int pre = 0;
+        vector<Block *> constraint_blocks;
         MyList<Patch> *Pp = GH->PatL[lev];
         while (Pp)
         {
           MyList<Block> *BP = Pp->data->blb;
           while (BP)
           {
-            Block *cg = BP->data;
-            if (myrank == cg->rank)
-            {
-              f_compute_rhs_bssn(cg->shape, TRK4, cg->X[0], cg->X[1], cg->X[2],
+            if (myrank == BP->data->rank)
+              constraint_blocks.push_back(BP->data);
+            if (BP == Pp->data->ble)
+              break;
+            BP = BP->next;
+          }
+          Pp = Pp->next;
+        }
+
+#if defined(AMSS_OMP_ONLY) && defined(AMSS_OMP_CONSTRAINT_PARALLEL)
+        #pragma omp parallel for schedule(static) if (constraint_blocks.size() > 1)
+#endif
+        for (int block_index = 0;
+             block_index < static_cast<int>(constraint_blocks.size());
+             ++block_index)
+        {
+          Block *cg = constraint_blocks[block_index];
+          f_compute_rhs_bssn(cg->shape, TRK4, cg->X[0], cg->X[1], cg->X[2],
                                  cg->fgfs[phi0->sgfn], cg->fgfs[trK0->sgfn],
                                  cg->fgfs[gxx0->sgfn], cg->fgfs[gxy0->sgfn], cg->fgfs[gxz0->sgfn], 
                                  cg->fgfs[gyy0->sgfn], cg->fgfs[gyz0->sgfn], cg->fgfs[gzz0->sgfn],
@@ -3058,12 +3475,6 @@ void bssn_class::Constraint_Out()
                                  cg->fgfs[Cons_Px->sgfn], cg->fgfs[Cons_Py->sgfn], cg->fgfs[Cons_Pz->sgfn],
                                  cg->fgfs[Cons_Gx->sgfn], cg->fgfs[Cons_Gy->sgfn], cg->fgfs[Cons_Gz->sgfn],
                                  Symmetry, lev, ndeps, pre);
-            }
-            if (BP == Pp->data->ble)
-              break;
-            BP = BP->next;
-          }
-          Pp = Pp->next;
         }
       }
       Parallel::Sync(GH->PatL[lev], ConstraintList, Symmetry);
@@ -3112,6 +3523,9 @@ void bssn_class::Constraint_Out()
 
 void bssn_class::Interp_Constraint(bool infg)
 {
+#ifdef AMSS_OMP_DIAGNOSTICS
+  const double omp_initial_interp_start = infg ? omp_get_wtime() : 0;
+#endif
   if (infg)
   {
     // we do not support a_lev != 0 yet.
@@ -3121,22 +3535,41 @@ void bssn_class::Interp_Constraint(bool infg)
     // recompute least the constraint data lost for moved new grid
     for (int lev = 0; lev < GH->levels; lev++)
     {
+#if defined(AMSS_OMP_ONLY) && defined(AMSS_OMP_INITIAL_CONSTRAINT_PARALLEL)
+      OmpThreadScope omp_initial_constraint_threads(
+          omp_threads_for_level(lev, GH->movls));
+#endif
       // make sure the data consistent for higher levels
       if (lev > 0) // if the constrait quantities can be reused from the step rhs calculation
       {
         double TRK4 = PhysTime;
         double ndeps = numepsb;
         int pre = 0;
+        vector<Block *> constraint_blocks;
         MyList<Patch> *Pp = GH->PatL[lev];
         while (Pp)
         {
           MyList<Block> *BP = Pp->data->blb;
           while (BP)
           {
-            Block *cg = BP->data;
-            if (myrank == cg->rank)
-            {
-              f_compute_rhs_bssn(cg->shape, TRK4, cg->X[0], cg->X[1], cg->X[2],
+            if (myrank == BP->data->rank)
+              constraint_blocks.push_back(BP->data);
+            if (BP == Pp->data->ble)
+              break;
+            BP = BP->next;
+          }
+          Pp = Pp->next;
+        }
+
+#if defined(AMSS_OMP_ONLY) && defined(AMSS_OMP_INITIAL_CONSTRAINT_PARALLEL)
+        #pragma omp parallel for schedule(static) if (constraint_blocks.size() > 1)
+#endif
+        for (int block_index = 0;
+             block_index < static_cast<int>(constraint_blocks.size());
+             ++block_index)
+        {
+          Block *cg = constraint_blocks[block_index];
+          f_compute_rhs_bssn(cg->shape, TRK4, cg->X[0], cg->X[1], cg->X[2],
                                  cg->fgfs[phi0->sgfn], cg->fgfs[trK0->sgfn],
                                  cg->fgfs[gxx0->sgfn], cg->fgfs[gxy0->sgfn], cg->fgfs[gxz0->sgfn], 
                                  cg->fgfs[gyy0->sgfn], cg->fgfs[gyz0->sgfn], cg->fgfs[gzz0->sgfn],
@@ -3170,12 +3603,6 @@ void bssn_class::Interp_Constraint(bool infg)
                                  cg->fgfs[Cons_Px->sgfn], cg->fgfs[Cons_Py->sgfn], cg->fgfs[Cons_Pz->sgfn],
                                  cg->fgfs[Cons_Gx->sgfn], cg->fgfs[Cons_Gy->sgfn], cg->fgfs[Cons_Gz->sgfn],
                                  Symmetry, lev, ndeps, pre);
-            }
-            if (BP == Pp->data->ble)
-              break;
-            BP = BP->next;
-          }
-          Pp = Pp->next;
         }
       }
       Parallel::Sync(GH->PatL[lev], ConstraintList, Symmetry);
@@ -3242,6 +3669,14 @@ void bssn_class::Interp_Constraint(bool infg)
   }
 
   delete[] shellf;
+#ifdef AMSS_OMP_DIAGNOSTICS
+  if (infg)
+  {
+    ++omp_initial_interp_constraint_calls;
+    omp_initial_interp_constraint_wall +=
+        omp_get_wtime() - omp_initial_interp_start;
+  }
+#endif
 }
 
 //================================================================================================
@@ -3256,6 +3691,9 @@ void bssn_class::Interp_Constraint(bool infg)
 
 void bssn_class::Compute_Constraint()
 {
+#ifdef AMSS_OMP_DIAGNOSTICS
+  const double omp_compute_constraint_start = omp_get_wtime();
+#endif
   double TRK4 = PhysTime;
   double ndeps = numepsb;
   int pre = 0;
@@ -3263,17 +3701,36 @@ void bssn_class::Compute_Constraint()
 
   for (lev = 0; lev < GH->levels; lev++)
   {
+#if defined(AMSS_OMP_ONLY) && defined(AMSS_OMP_INITIAL_CONSTRAINT_PARALLEL)
+    OmpThreadScope omp_initial_constraint_threads(
+        omp_threads_for_level(lev, GH->movls));
+#endif
     {
+      vector<Block *> constraint_blocks;
       MyList<Patch> *Pp = GH->PatL[lev];
       while (Pp)
       {
         MyList<Block> *BP = Pp->data->blb;
         while (BP)
         {
-          Block *cg = BP->data;
-          if (myrank == cg->rank)
-          {
-            f_compute_rhs_bssn(cg->shape, TRK4, cg->X[0], cg->X[1], cg->X[2],
+          if (myrank == BP->data->rank)
+            constraint_blocks.push_back(BP->data);
+          if (BP == Pp->data->ble)
+            break;
+          BP = BP->next;
+        }
+        Pp = Pp->next;
+      }
+
+#if defined(AMSS_OMP_ONLY) && defined(AMSS_OMP_INITIAL_CONSTRAINT_PARALLEL)
+      #pragma omp parallel for schedule(static) if (constraint_blocks.size() > 1)
+#endif
+      for (int block_index = 0;
+           block_index < static_cast<int>(constraint_blocks.size());
+           ++block_index)
+      {
+        Block *cg = constraint_blocks[block_index];
+        f_compute_rhs_bssn(cg->shape, TRK4, cg->X[0], cg->X[1], cg->X[2],
                                cg->fgfs[phi0->sgfn], cg->fgfs[trK0->sgfn],
                                cg->fgfs[gxx0->sgfn], cg->fgfs[gxy0->sgfn], cg->fgfs[gxz0->sgfn], 
                                cg->fgfs[gyy0->sgfn], cg->fgfs[gyz0->sgfn], cg->fgfs[gzz0->sgfn],
@@ -3307,12 +3764,6 @@ void bssn_class::Compute_Constraint()
                                cg->fgfs[Cons_Px->sgfn], cg->fgfs[Cons_Py->sgfn], cg->fgfs[Cons_Pz->sgfn],
                                cg->fgfs[Cons_Gx->sgfn], cg->fgfs[Cons_Gy->sgfn], cg->fgfs[Cons_Gz->sgfn],
                                Symmetry, lev, ndeps, pre);
-          }
-          if (BP == Pp->data->ble)
-            break;
-          BP = BP->next;
-        }
-        Pp = Pp->next;
       }
     }
     Parallel::Sync(GH->PatL[lev], ConstraintList, Symmetry);
@@ -3320,6 +3771,11 @@ void bssn_class::Compute_Constraint()
   // prolong restrict constraint quantities
   for (lev = GH->levels - 1; lev > 0; lev--)
     RestrictProlong(lev, 1, false, ConstraintList, ConstraintList, ConstraintList);
+
+#ifdef AMSS_OMP_DIAGNOSTICS
+  ++omp_compute_constraint_calls;
+  omp_compute_constraint_wall += omp_get_wtime() - omp_compute_constraint_start;
+#endif
 
 }
 

@@ -58,7 +58,7 @@ def run_TwoPunctureABE():
 
 
 def run_ABE():
-    """Run the main ABE evolution executable via mpiexec."""
+    """Run the main ABE evolution executable."""
     if input_data.GPU_Calculation == "no":
         exe, log = "./ABE", "ABE_out.log"
     elif input_data.GPU_Calculation == "yes":
@@ -66,8 +66,23 @@ def run_ABE():
     else:
         raise ValueError("GPU_Calculation must be 'no' or 'yes'")
 
+    omp_only = (os.environ.get("AMSS_OMP_ONLY_RUN", "0").lower()
+                in ("1", "on", "true", "yes"))
+    if (os.environ.get("AMSS_EXECUTION_MODE", "cpu").lower() == "cpu"
+            and input_data.GPU_Calculation == "no"):
+        omp_only = True
+    omp_threads = os.environ.get("OMP_NUM_THREADS",
+                                 str(input_data.OMP_threads))
+
+    if omp_only:
+        print(f"\n Running {exe} directly as one OpenMP process "
+              f"with OMP_NUM_THREADS={omp_threads}\n")
+        _run_and_tee(f"{exe} < /dev/null", log)
+        print(f"\n The {exe} simulation is finished\n")
+        return
+
     print(f"\n Running {exe} with {input_data.MPI_processes} MPI ranks "
-          f"and OMP_NUM_THREADS={input_data.OMP_threads}\n")
+          f"and OMP_NUM_THREADS={omp_threads}\n")
 
     # Build the launcher command. `env VAR=... exe` form works on both
     # OpenMPI and MPICH; the original -x flag was OpenMPI-only.

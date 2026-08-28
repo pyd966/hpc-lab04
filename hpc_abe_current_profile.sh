@@ -1,0 +1,30 @@
+#!/bin/bash
+#HPC --partition=lab4
+#HPC --cpu=60
+#HPC --mem=100Gi
+#HPC --time=30m
+#HPC --name=abe-current-profile
+#HPC --output=profile/hpc_%x_%j.log
+set -euo pipefail
+
+ROOT_DIR="${AMSS_ROOT_DIR:-$PWD}"
+[[ -f "$ROOT_DIR/hpc_abe_profile.sh" ]] || exit 2
+
+export AMSS_ENABLE_OMP_DIRECT_SYNC=ON
+export AMSS_ENABLE_OMP_DIRECT_AMR_TRANSFER=OFF
+export AMSS_ENABLE_OMP_DIRECT_AMR_SPLIT=OFF
+export AMSS_ENABLE_HUGEPAGE_HINT=OFF
+export AMSS_ENABLE_BLOCK_FIELD_ARENA=ON
+export AMSS_ENABLE_LTO=OFF
+export AMSS_RHS_METRIC_FUSION=ON
+export AMSS_RHS_GAMMA_FUSION=ON
+export AMSS_RHS_CONNECTION_FUSION=OFF
+export AMSS_RHS_AIJ_FUSION=OFF
+export AMSS_RHS_CHI_RICCI_FUSION=OFF
+export AMSS_RHS_FIRST_CONNECTION_FUSION=OFF
+export AMSS_RHS_FIRST_CONNECTION_PAIR_FUSION=ON
+export AMSS_RHS_RICCI_TILING=ON
+export AMSS_RHS_RICCI_TILE_J=1
+export ABE_PROFILE_TIME="${ABE_PROFILE_TIME:-4.0}"
+
+exec "$ROOT_DIR/hpc_abe_profile.sh"

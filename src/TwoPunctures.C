@@ -4,6 +4,7 @@
 #include <ctype.h>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <iostream>
 #include <iomanip>
@@ -13,6 +14,15 @@
 #include <cstdio>
 #include <complex>
 #include <vector>
+#include <cerrno>
+#include <chrono>
+#ifdef __linux__
+#include <sched.h>
+#include <unistd.h>
+#endif
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 using namespace std;
 #else
 #include <assert.h>
@@ -28,6 +38,129 @@ using namespace std;
 #endif
 
 #include "TwoPunctures.h"
+
+#ifdef newc
+#ifdef __linux__
+static int twop_affinity_cpu_count(const cpu_set_t &cpus)
+{
+  int count = 0;
+  for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu)
+    if (CPU_ISSET(cpu, &cpus))
+      ++count;
+  return count;
+}
+
+static bool twop_parse_cpu_list(const char *text, cpu_set_t &cpus)
+{
+  CPU_ZERO(&cpus);
+  if (text == NULL || *text == '\0')
+    return false;
+  const char *cursor = text;
+  bool found_cpu = false;
+  while (*cursor != '\0')
+  {
+    errno = 0;
+    char *end = NULL;
+    long first = strtol(cursor, &end, 10);
+    if (errno != 0 || end == cursor || first < 0 || first >= CPU_SETSIZE)
+      return false;
+    long last = first;
+    if (*end == '-')
+    {
+      cursor = end + 1;
+      errno = 0;
+      last = strtol(cursor, &end, 10);
+      if (errno != 0 || end == cursor || last < first || last >= CPU_SETSIZE)
+        return false;
+    }
+    for (long cpu = first; cpu <= last; ++cpu)
+      CPU_SET(cpu, &cpus);
+    found_cpu = true;
+    if (*end == '\0')
+      break;
+    if (*end != ',')
+      return false;
+    cursor = end + 1;
+  }
+  return found_cpu;
+}
+
+__attribute__((constructor(101)))
+static void twop_prepare_affinity_before_main()
+{
+  if (getenv("AMSS_AFFINITY_PREPARED") != NULL)
+    return;
+  const char *requested = getenv("AMSS_SCHEDULER_CPU_LIST");
+  cpu_set_t target;
+  if (requested == NULL || !twop_parse_cpu_list(requested, target))
+    return;
+  if (sched_setaffinity(0, sizeof(target), &target) != 0)
+    return;
+  if (setenv("AMSS_AFFINITY_PREPARED", "1", 1) != 0)
+    return;
+  execl("/proc/self/exe", "TwoPunctureABE", (char *)NULL);
+  const int exec_errno = errno;
+  unsetenv("AMSS_AFFINITY_PREPARED");
+  dprintf(STDERR_FILENO, "TwoPuncture affinity re-exec failed: %s\n",
+          strerror(exec_errno));
+}
+#endif
+
+static void twop_restore_and_report_affinity()
+{
+  cout << "==> TwoPunctures.C diagnostics: affinity-restore-v1" << endl;
+#ifdef __linux__
+  cpu_set_t inherited;
+  cpu_set_t active;
+  const bool have_inherited = sched_getaffinity(0, sizeof(inherited), &inherited) == 0;
+  const char *requested = getenv("AMSS_SCHEDULER_CPU_LIST");
+  const char *restore_status = "not-requested";
+  int restore_errno = 0;
+  if (requested != NULL && *requested != '\0')
+  {
+    cpu_set_t target;
+    if (!twop_parse_cpu_list(requested, target))
+      restore_status = "invalid-target";
+    else if (sched_setaffinity(0, sizeof(target), &target) != 0)
+    {
+      restore_status = "failed";
+      restore_errno = errno;
+    }
+    else
+      restore_status = "ok";
+  }
+  const bool have_active = sched_getaffinity(0, sizeof(active), &active) == 0;
+  cout << "==> TwoPunctures.C affinity: inherited="
+       << (have_inherited ? twop_affinity_cpu_count(inherited) : -1)
+       << " target=" << ((requested != NULL && *requested != '\0') ? requested : "unset")
+       << " active=" << (have_active ? twop_affinity_cpu_count(active) : -1)
+       << " restore=" << restore_status;
+  if (restore_errno != 0)
+    cout << " errno=" << restore_errno << " (" << strerror(restore_errno) << ")";
+  cout << endl;
+#else
+  cout << "==> TwoPunctures.C affinity: unsupported platform" << endl;
+#endif
+#ifdef _OPENMP
+  const int max_threads = omp_get_max_threads();
+  const int num_places = omp_get_num_places();
+  int place_cpus = 0;
+  for (int place = 0; place < num_places; ++place)
+    place_cpus += omp_get_place_num_procs(place);
+  int team_size = 1;
+#pragma omp parallel
+  {
+#pragma omp single
+    team_size = omp_get_num_threads();
+  }
+  cout << "==> TwoPunctures.C OpenMP: enabled=1 max_threads=" << max_threads
+       << " places=" << num_places << " place_cpus=" << place_cpus
+       << " team=" << team_size << endl;
+#else
+  cout << "==> TwoPunctures.C OpenMP: enabled=0 max_threads=1 team=1" << endl;
+#endif
+}
+#endif
 
 namespace
 {
@@ -250,6 +383,10 @@ TwoPunctures::~TwoPunctures()
 
 void TwoPunctures::Solve()
 {
+#ifdef newc
+  twop_restore_and_report_affinity();
+  const chrono::steady_clock::time_point solve_start = chrono::steady_clock::now();
+#endif
 
   double mp = par_m_plus;
   double mm = par_m_minus;
@@ -355,6 +492,11 @@ void TwoPunctures::Solve()
 
   target_M_plus = Mp_adm;
   target_M_minus = Mm_adm;
+#ifdef newc
+  const double solve_seconds = chrono::duration<double>(chrono::steady_clock::now() - solve_start).count();
+  cout << "==> TwoPunctures.C Solve wall time: " << fixed << setprecision(6)
+       << solve_seconds << " seconds" << endl;
+#endif
 }
 void TwoPunctures::Save(char *fname)
 {

@@ -31,10 +31,33 @@ import shutil
 import sys
 import time
 
+# Native libraries imported by matplotlib may honor OMP_PROC_BIND and narrow
+# the Python process to one OpenMP place. Preserve the scheduler's full cpuset
+# before those imports so both compute executables inherit the allocation.
+SCHEDULER_AFFINITY = os.sched_getaffinity(0)
+
 import matplotlib
 matplotlib.use("Agg")          # headless: write figures to files, no display
+os.sched_setaffinity(0, SCHEDULER_AFFINITY)
 
 import AMSS_NCKU_Input as input_data
+
+# run.sh resolves automatic mode from the configured build. Direct Python
+# invocation falls back to the mode selected in AMSS_NCKU_Input.py.
+EXECUTION_MODE = os.environ.get("AMSS_EXECUTION_MODE", "auto").lower()
+if EXECUTION_MODE == "auto":
+    EXECUTION_MODE = ("gpu" if input_data.GPU_Calculation == "yes" else "cpu")
+if EXECUTION_MODE == "cpu":
+    input_data.GPU_Calculation = "no"
+    input_data.Final_Evolution_Time = 40.0
+    # Also make direct `python3 AMSS_NCKU_Program.py` CPU-only.  run.sh adds
+    # the detected core count and binding policy around this default.
+    os.environ.setdefault("AMSS_OMP_ONLY_RUN", "1")
+elif EXECUTION_MODE == "gpu":
+    input_data.GPU_Calculation = "yes"
+    input_data.Final_Evolution_Time = 100.0
+else:
+    sys.exit(" AMSS_EXECUTION_MODE must be 'auto', 'cpu' or 'gpu'")
 
 # A shortened evolution window is useful for profiler iterations that cannot
 # fit the full fixed workload into the cluster wall-time limit. It is opt-in;
@@ -105,6 +128,10 @@ def _safe_rmtree(path):
 
 os.chdir(REPO_ROOT)
 
+DRIVER_AFFINITY = SCHEDULER_AFFINITY
+print(f"==> Driver CPU affinity before TwoPuncture: "
+      f"{len(DRIVER_AFFINITY)} CPUs {sorted(DRIVER_AFFINITY)}", flush=True)
+
 ##################################################################
 ## This trimmed lab build supports both CPU (ABE) and GPU (ABEGPU) BSSN
 ## evolution with Ansorg-TwoPuncture initial data.
@@ -128,8 +155,12 @@ for exe in (abe_built, twop_built):
         sys.exit(f" Missing executable: {exe}\n"
                  f" Build first:  cmake -B build -S .  &&  cmake --build build -j")
 
-## OpenMP threads per MPI rank (inherited by the mpirun child process)
-os.environ["OMP_NUM_THREADS"] = str(input_data.OMP_threads)
+## Preserve an explicit scheduler/job setting; the input-file value is only
+## the fallback for interactive runs.  In OpenMP-only mode there is one
+## process, regardless of the legacy MPI_processes input value.
+os.environ.setdefault("OMP_NUM_THREADS", str(input_data.OMP_threads))
+if os.environ.get("AMSS_OMP_ONLY_RUN", "0").lower() in ("1", "on", "true", "yes"):
+    input_data.MPI_processes = 1
 
 ## TwoPuncture initial-data cache (opt-in, for fast debugging)
 TWOP_CACHE   = os.environ.get("AMSS_NCKU_TWOP_CACHE", "") == "1"
@@ -239,6 +270,13 @@ else:
             shutil.copy2(os.path.join(output_directory, f),
                          os.path.join(cache_dir, f))
         print(f" TwoPuncture output cached ({key})")
+
+current_affinity = os.sched_getaffinity(0)
+print(f"==> Driver CPU affinity after TwoPuncture: "
+      f"{len(current_affinity)} CPUs {sorted(current_affinity)}", flush=True)
+if current_affinity != DRIVER_AFFINITY:
+    print("==> Restoring scheduler CPU affinity before ABE", flush=True)
+    os.sched_setaffinity(0, DRIVER_AFFINITY)
 
 ##################################################################
 ## Update puncture parameters from the TwoPuncture output, then

@@ -7,6 +7,8 @@
 #include <string>
 #include <cmath>
 #include <map>
+#include <cerrno>
+#include <climits>
 using namespace std;
 
 #include <mpi.h>
@@ -16,6 +18,46 @@ using namespace std;
 #include "cgh.h"
 #include "Parallel.h"
 #include "parameters.h"
+
+namespace
+{
+int omp_block_target(const char *specific_name)
+{
+#ifdef AMSS_OMP_ONLY
+    const char *name = specific_name;
+    const char *text = getenv(name);
+    if (!text || !*text)
+    {
+        name = "AMSS_OMP_BLOCK_TARGET";
+        text = getenv(name);
+    }
+    if (!text || !*text)
+        return 0;
+
+    char *end = 0;
+    errno = 0;
+    long target = strtol(text, &end, 10);
+    if (errno || end == text || *end || target < 1 || target > INT_MAX)
+    {
+        cerr << name << " must be an integer in [1, " << INT_MAX
+             << "]: " << text << endl;
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+    return static_cast<int>(target);
+#else
+    (void)specific_name;
+    return 0;
+#endif
+}
+
+int omp_block_target_for_level(int lev, int first_moving_level)
+{
+    return omp_block_target(
+        lev < first_moving_level
+            ? "AMSS_OMP_STATIC_BLOCK_TARGET"
+            : "AMSS_OMP_MOVING_BLOCK_TARGET");
+}
+}
 
 //================================================================================================
 
@@ -91,7 +133,9 @@ void cgh::compose_cgh(int nprocs)
     for (int lev = 0; lev < levels; lev++)
     {
         checkPatchList(PatL[lev], false);
-        Parallel::distribute(PatL[lev], nprocs, ingfs, fngfs, false);
+        Parallel::distribute(
+            PatL[lev], nprocs, ingfs, fngfs, false,
+            omp_block_target_for_level(lev, movls));
     }
 }
 
@@ -467,7 +511,9 @@ void cgh::recompose_cgh(int nprocs, bool *lev_flag,
             MyList<Patch> *tmPat = 0;
             tmPat = construct_patchlist(lev, Symmetry);
             // tmPat construction completes
-            Parallel::distribute(tmPat, nprocs, ingfs, fngfs, false);
+            Parallel::distribute(
+                tmPat, nprocs, ingfs, fngfs, false,
+                omp_block_target_for_level(lev, movls));
             //    checkPatchList(tmPat,true);
             bool CC = (lev > trfls);
             Parallel::fill_level_data(tmPat, PatL[lev], PatL[lev - 1], OldList, StateList, FutureList, tmList, Symmetry, BB, CC);
@@ -942,7 +988,9 @@ void cgh::recompose_cgh_Onelevel(
     MyList<Patch> *tmPat = 0;
     tmPat = construct_patchlist(lev, Symmetry);
     // tmPat construction completes
-    Parallel::distribute(tmPat, nprocs, ingfs, fngfs, false);
+    Parallel::distribute(
+        tmPat, nprocs, ingfs, fngfs, false,
+        omp_block_target_for_level(lev, movls));
     //    checkPatchList(tmPat,true);
     bool CC = (lev > trfls);
 #ifdef USE_GPU

@@ -39,6 +39,7 @@ real*8,intent(in) :: eps
 real*8,dimension(-2:ex(1),-2:ex(2),-2:ex(3))   :: fh
 integer :: imin,jmin,kmin,imax,jmax,kmax
 integer :: i,j,k
+integer :: ibegin,iend,jbegin,jend,kbegin,kend
 real*8  :: dX,dY,dZ
 real*8, parameter :: ONE=1.d0,SIX=6.d0,FIT=1.5d1,TWT=2.d1
 real*8,parameter::cof=6.4d1   ! 2^6
@@ -64,6 +65,19 @@ integer, parameter :: NO_SYMM=0, OCTANT=2
 
   call symmetry_bd(3,ex,f,fh,SoA)
 
+#ifdef AMSS_KODIS_SIMD
+  ibegin = max(1,imin+3)
+  iend   = min(ex(1),imax-3)
+  jbegin = max(1,jmin+3)
+  jend   = min(ex(2),jmax-3)
+  kbegin = max(1,kmin+3)
+  kend   = min(ex(3),kmax-3)
+
+  do k=kbegin,kend
+  do j=jbegin,jend
+!$omp simd
+  do i=ibegin,iend
+#else
   do k=1,ex(3)
   do j=1,ex(2)
   do i=1,ex(1)
@@ -71,6 +85,7 @@ integer, parameter :: NO_SYMM=0, OCTANT=2
   if(i-3 >= imin .and. i+3 <= imax .and. &
      j-3 >= jmin .and. j+3 <= jmax .and. &
      k-3 >= kmin .and. k+3 <= kmax) then
+#endif
 #if 0     
 ! x direction
    f_rhs(i,j,k)       = f_rhs(i,j,k) + eps/dX/cof * (     &
@@ -110,7 +125,9 @@ integer, parameter :: NO_SYMM=0, OCTANT=2
                           FIT*(fh(i,j,k-1)+fh(i,j,k+1)) - &
                           TWT* fh(i,j,k)            )/dZ )
 #endif
+#ifndef AMSS_KODIS_SIMD
   endif
+#endif
 
   enddo
   enddo
