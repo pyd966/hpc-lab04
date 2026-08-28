@@ -14,10 +14,11 @@ ulimit -s unlimited
 # HPC jobs run inside a root container even when submitted by a regular user.
 # Open MPI 5.x (prterun) therefore needs its explicit container opt-in. These
 # variables are ignored for non-root launches and preserve a caller-supplied
-# AMSS_MPIEXEC.
+# AMSS_MPIEXEC unless it contains the OJ-incompatible PE mapping described
+# below.
 export OMPI_ALLOW_RUN_AS_ROOT="${OMPI_ALLOW_RUN_AS_ROOT:-1}"
 export OMPI_ALLOW_RUN_AS_ROOT_CONFIRM="${OMPI_ALLOW_RUN_AS_ROOT_CONFIRM:-1}"
-AMSS_MPIEXEC="${AMSS_MPIEXEC:-mpiexec --allow-run-as-root}"
+AMSS_MPIEXEC="${AMSS_MPIEXEC:-mpiexec --allow-run-as-root --bind-to core}"
 
 ROOT_DIR="$(pwd)"
 PYTHON="${PYTHON:-python3}"
@@ -32,7 +33,17 @@ resolve_under_root() {
 AMSS_BUILD_DIR="$(resolve_under_root "${AMSS_BUILD_DIR:-$ROOT_DIR/build}")"
 AMSS_OUTPUT_ROOT="$(resolve_under_root "${AMSS_OUTPUT_ROOT:-$ROOT_DIR}")"
 AMSS_CACHE_DIR="$(resolve_under_root "${AMSS_CACHE_DIR:-$ROOT_DIR/twopuncture_cache}")"
-AMSS_MPIEXEC="${AMSS_MPIEXEC:-mpiexec}"
+
+# The OJ's container currently exports
+# `mpiexec --bind-to core --map-by slot:pe=16`.  With one GPU rank this asks
+# Open MPI's mapper for 16 processing elements, but the mapper sees a smaller
+# bindable cpuset and exits with "Out of resource" before ABEGPU starts.  A
+# single rank only needs ordinary core binding; keep the MPI launch and remove
+# the invalid PE request.  Other caller-supplied launchers remain untouched.
+if [[ "$AMSS_MPIEXEC" == *"--map-by slot:pe="* ]]; then
+  echo "warning: ignoring incompatible AMSS_MPIEXEC PE mapping: $AMSS_MPIEXEC" >&2
+  AMSS_MPIEXEC="mpiexec --allow-run-as-root --bind-to core"
+fi
 export AMSS_BUILD_DIR AMSS_OUTPUT_ROOT AMSS_CACHE_DIR AMSS_MPIEXEC
 
 if [[ "${1:-}" == "--twop-cache" ]]; then
